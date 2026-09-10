@@ -15,6 +15,7 @@
 ├── result/      求解产物（每个新解一份 solN.svg / solN.txt + solutions.jsonl）
 ├── tests/       冒烟测试
 ├── docs/        布局参考图、原始布局文本、分析报告、归档代码
+├── requirements.txt
 └── README.md
 ```
 
@@ -22,37 +23,50 @@
 统一推导（= 本文件上一级），因此**从任何工作目录运行、或由 WebUI 以子进程
 调用，结果都会落到项目的 `result/` 下**。
 
-## 运行
+## 安装
 
-启发式版（无第三方依赖，能直接跑）：
+只有**精确最优求解器**需要第三方依赖（OR-Tools）；启发式求解器、可视化、
+WebUI 全部只用 Python 标准库，不装任何东西也能跑。
 
 ```bash
+python -m pip install -r requirements.txt
+```
+
+源码直接运行，无需 `pip install -e .` 或任何构建步骤——用 `python src/xxx.py`
+即可（各脚本通过同目录导入互相引用）。
+
+国内网络建议加镜像：
+
+```bash
+python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+> OR-Tools 自带 CP-SAT 本地二进制，体积较大（约 100–300 MB）。
+> 只想要启发式版的话可以跳过这步。
+
+## 快速开始
+
+```bash
+# 1) 启发式求解（不需要 OR-Tools）
 python src/layout_solver.py configs/config.toy.json --timeout 10
-```
 
-精确最优版（需要 OR-Tools）：
-
-```bash
+# 2) 精确最优求解（需要 OR-Tools，见「安装」）
 python src/layout_exact.py configs/config.toy.json --time-limit 60
-python src/layout_exact.py configs/config.cross.json --time-limit 20
+
+# 3) 图形界面
+python src/webui_server.py --port 8765     # 打开 http://127.0.0.1:8765/
+
+# 4) 自检（不需要 OR-Tools，约 5 秒）
+python tests/test_smoke.py
 ```
 
-WebUI：
-
-```bash
-python src/webui_server.py --port 8765
-# 浏览器打开 http://127.0.0.1:8765/
-```
-
-Windows 下如果中文乱码，可先设置：
-
-```powershell
-$env:PYTHONIOENCODING="utf-8"
-```
+Windows 下如果中文乱码，可先设置 `$env:PYTHONIOENCODING="utf-8"`。
 
 > 提示：`configs/config.example.json` 状态空间很大，跑几分钟也未必到
 > `OPTIMAL`，不适合快速试跑；小规模验证请用 `config.toy.json` /
 > `config.cross.json`。
+
+各类求解器的详细用法见下文「启发式求解」「精确最优求解（CP-SAT）」。
 
 ## 模块一览
 

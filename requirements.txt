@@ -1,0 +1,19 @@
+# ---------------------------------------------------------------------------
+# 依赖清单
+#
+# 本项目只有一个第三方依赖：OR-Tools（精确最优求解器 CP-SAT 用）。
+# 其余全部是 Python 标准库，因此：
+#   - 启发式求解器 src/layout_solver.py   不需要装任何东西就能跑
+#   - 可视化      src/layout_viz.py       纯标准库
+#   - WebUI       src/webui_server.py     纯标准库（不需要 flask/fastapi）
+#   - 精确求解器  src/layout_exact.py     需要 OR-Tools
+#
+# 安装（建议先建虚拟环境）：
+#     python -m pip install -r requirements.txt
+#
+# OR-Tools 自带 CP-SAT 的本地二进制，体积较大（约 100~300 MB），
+# 国内网络可加镜像：
+#     python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# ---------------------------------------------------------------------------
+
+ortools>=9.7
