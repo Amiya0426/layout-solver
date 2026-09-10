@@ -85,11 +85,8 @@
     <label>时间上限 <input type="number" id="solveTimeout" value="120" min="1"></label>
     <label>线程 <input type="number" id="solveWorkers" value="8" min="1"></label>
     <label>随机种子 <input type="number" id="solveSeed" min="0" placeholder="留空随机"></label>
-    <label>最多保存解 <input type="number" id="solveMaxSolutions" value="200" min="0" style="width:70px"></label>
-    <label class="inline" title="把该题目上次的最好解作为 CP-SAT 起点，再次求解时更快找到同级别解">
-      <input type="checkbox" id="solveHint">Warm start（用上次最好解做起点）</label>
-    <label class="inline" title="配合 Warm start：把目标下界也压到上次 cost+1，只搜索严格更优的解；若上次已是最优，可能搜不到解">
-      <input type="checkbox" id="solveHintStrict" disabled>只找严格更优解</label>
+    <label class="inline" title="用该题目上次的最好解做完整 Hint，并同时施加历史上下界：obj<=上次最好解、obj>=上次已证明的下界（下界存在 .bounds.json，带配置/代码指纹校验）">
+      <input type="checkbox" id="solveHint">Warm start（用上次最好解做起点，并压上/抬下界）</label>
     <button id="btnSolve" class="primary">开始求解</button>
     <button id="btnPause" disabled>暂停</button>
     <button id="btnStop" disabled>停止</button>

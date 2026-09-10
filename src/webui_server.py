@@ -126,6 +126,80 @@ def job_log(job, line):
             job["log_base"] += extra
 
 
+BOUND_KEY_MARK = "[exact] bounds-key "
+BOUND_NEXT_RE = re.compile(r"\bnext:\[\s*(\d+)\s*,")
+
+
+def watch_bound_line(job, line):
+    """从求解日志里收集“已证明的目标下界”和界文件的 key。
+
+    为什么要在服务端做：WebUI 的「停止」是直接 terminate 子进程，
+    子进程没有机会执行自己的收尾代码，但它打印过的日志都在服务端，
+    于是“手动停止”也能把已经证明出来的下界保存下来。
+    """
+    if BOUND_KEY_MARK in line:
+        try:
+            key = json.loads(line.split(BOUND_KEY_MARK, 1)[1])
+        except Exception:  # noqa: BLE001  半行/格式不符时忽略
+            return
+        if isinstance(key, dict) and key.get("prefix"):
+            job["bound_key"] = key
+        return
+    m = BOUND_NEXT_RE.search(line)
+    if not m:
+        return
+    try:
+        lb = int(m.group(1))
+    except ValueError:
+        return
+    if lb > job.get("bound_lb", 0):
+        job["bound_lb"] = lb
+
+
+def persist_job_bound(job, status=None):
+    """把日志里看到的最强下界落盘（进程被强杀时也能生效）。
+
+    - 子进程正常收工时自己会写 bounds.json，这里只在“日志里的界更强”时补写，
+      不会覆盖掉子进程写下的 best/status；
+    - 指纹沿用子进程打印的 bounds-key，保持与 layout_exact 完全相同的复用约定。
+    """
+    key = job.get("bound_key")
+    lb = int(job.get("bound_lb") or 0)
+    if not key or lb <= 0:
+        return None
+    path = key["prefix"] + ".bounds.json"
+    rec = read_json(path, {})
+    if not isinstance(rec, dict):
+        rec = {}
+    same = (rec.get("config_sha256") == key.get("config_sha256")
+            and rec.get("code_sha256") == key.get("code_sha256"))
+    prev_lb = rec.get("lb") if same else None
+    prev_lb = prev_lb if isinstance(prev_lb, int) else 0
+    if lb <= prev_lb:
+        return None
+    new = dict(rec) if same else {}
+    new["lb"] = lb
+    new["status"] = status or job.get("status") or "stopped"
+    new["when"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    new.setdefault("best", None)          # 子进程来不及写的字段补 null
+    new.setdefault("applied", [])
+    new.setdefault("solve_sec", None)
+    new.setdefault("ortools", None)
+    new["config_sha256"] = key.get("config_sha256")
+    new["code_sha256"] = key.get("code_sha256")
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(new, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError as e:
+        job_log(job, f"[server] 下界落盘失败: {e}")
+        return None
+    job_log(job, f"[server] 已把日志中证明的下界 lb={lb} 存入 "
+                  f"{os.path.basename(path)}（下次 warm start 会用它抬下界）")
+    return new
+
+
 def job_snapshot(job, since=None, tail=None):
     """把作业状态打包给前端；since 给定时只回增量日志。"""
     with JOBS_LOCK:
@@ -227,6 +301,8 @@ def start_job(kind, name, cmd, quiet=False):
         "stopping": False,
         "pid": None,
         "proc": None,
+        "bound_key": None,   # 求解进程打印的界文件 key（供停止时落盘）
+        "bound_lb": 0,       # 日志里见到的最强下界
     }
     with JOBS_LOCK:
         JOBS[job_id] = job
@@ -256,7 +332,10 @@ def start_job(kind, name, cmd, quiet=False):
                 # 停止请求发生在 Popen 返回之前，这里补上终止
                 job_stop(job)
             for line in proc.stdout:
-                job_log(job, line.rstrip("\n"))
+                line = line.rstrip("\n")
+                job_log(job, line)
+                if kind == "solve":
+                    watch_bound_line(job, line)
             proc.wait()
             code = proc.returncode
         except Exception as e:  # noqa: BLE001
@@ -266,14 +345,19 @@ def start_job(kind, name, cmd, quiet=False):
                 job["proc"] = None
                 job["returncode"] = code
                 if job["stopped"]:
-                    job["status"] = "stopped"
+                    final_status = "stopped"
                 elif code == 0:
-                    job["status"] = "done"
+                    final_status = "done"
                 else:
-                    job["status"] = "error"
-                job["ended"] = time.time()
+                    final_status = "error"
             if code is None:
                 job_log(job, "[server] 进程启动失败")
+            # 先落盘、再对外发布终态：这样前端看到 “已停止” 时，副产品已写好
+            if kind == "solve":
+                persist_job_bound(job, final_status)
+            with JOBS_LOCK:
+                job["status"] = final_status
+                job["ended"] = time.time()
             # 被停止/异常退出时，JSONL 里可能已经有解但还没渲染出图：后台补齐
             if kind == "solve" and (job["stopped"] or code not in (0, None)):
                 try:
@@ -439,22 +523,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "config not found"}, 404)
             mode = body.get("mode", "exact")
             timeout = float(body.get("timeout", 120))
-            max_solutions = int(body.get("max_solutions", 200) or 0)
             if mode == "exact":
                 cmd = [sys.executable, os.path.join(SOURCE_DIR, "layout_exact.py"),
                        path, "--time-limit", str(timeout),
                        "--workers", str(int(body.get("workers", 8))),
-                       "--max-solutions", str(max_solutions),
                        "--verbose"]
                 if body.get("hint"):
                     cmd.append("--hint")
-                    if body.get("hint_strict"):
-                        cmd.append("--hint-strict")
             else:
                 cmd = [sys.executable, os.path.join(SOURCE_DIR, "layout_solver.py"),
                        path, "--timeout", str(timeout),
-                       "--seed", str(int(body.get("seed", 7))),
-                       "--max-solutions", str(max_solutions)]
+                       "--seed", str(int(body.get("seed", 7)))]
             job = start_job("solve", name, cmd)
             return self.send_json({"job": job["id"]})
 

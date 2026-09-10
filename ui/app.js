@@ -363,9 +363,7 @@ async function startSolve() {
     timeout: +$("solveTimeout").value,
     workers: +$("solveWorkers").value,
     seed: +seed,
-    max_solutions: +$("solveMaxSolutions").value || 0,
-    hint: $("solveHint").checked,
-    hint_strict: $("solveHintStrict").checked
+    hint: $("solveHint").checked
   };
   const r = await api("/api/solve", {
     method: "POST", headers: {"Content-Type": "application/json"},
@@ -841,11 +839,10 @@ $("btnAddNet").onclick = () => {
   renderNets();
 };
 $("btnSolve").onclick = startSolve;
-// 精确模式才有 warm start；「只找严格更优解」依赖 warm start
+// 只有精确模式支持 warm start（完整 Hint + 历史上下界）
 function syncHintUI() {
   const exact = $("solveMode").value === "exact";
   $("solveHint").disabled = !exact;
-  $("solveHintStrict").disabled = !exact || !$("solveHint").checked;
 }
 $("solveMode").onchange = syncHintUI;
 $("solveHint").onchange = syncHintUI;

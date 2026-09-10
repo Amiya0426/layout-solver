@@ -15,6 +15,10 @@ Thumbs.db
 # 求解过程中的临时文件
 *.tmp
 *.solutions.jsonl.tmp
+*.bounds.json.tmp
+
+# warm start 回归探针的临时输出（tests/warmstart_probe.py 会重新生成）
+tests/ws/
 
 # 注：result/ 是有价值的求解产物（SVG/字符画/JSONL），
 # 默认纳入版本管理；若不想提交请自行取消下一行注释。

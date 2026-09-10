@@ -580,25 +580,25 @@ def render_best(cfg_data, prefix, sols):
 
 
 class SolutionWriter:
-    """求解过程中增量输出可行解，并始终只保留**最优的** max_solutions 个。
+    """求解过程中增量输出可行解，**数量不限**。
 
     用法::
 
-        writer = SolutionWriter(cfg, "result/toy/toy", max_solutions=200)
+        writer = SolutionWriter(cfg, "result/toy/toy")
         writer.submit({"state": {...}, "paths": [...], "cost": 12})  # 立即返回
         writer.close()                                                # 等待落盘
 
     - `submit` 只做编号 + 入队，毫秒级返回，不阻塞求解；
     - 后台线程负责追加 JSONL（先写，便于网页立刻看到）和渲染 solN.svg/txt；
+    - 找到多少解就写多少，编号连续；
     - 真正的清空发生在“第一个可行解落盘时”：本次没找到解时，
       上一次的结果会原样保留，不会被空跑清掉。
     """
 
-    def __init__(self, cfg_data, prefix, max_solutions=200):
+    def __init__(self, cfg_data, prefix):
         self.cfg_data = cfg_data
         self.prefix = prefix
         self.best_svg = prefix + ".svg"
-        self.max_solutions = max(0, int(max_solutions or 0))
         self.count = 0
         self.costs = []
         self.errors = []
@@ -615,13 +615,10 @@ class SolutionWriter:
             target=self._run, name="solution-writer", daemon=True)
         self._thread.start()
 
-    def full(self):
-        return bool(self.max_solutions) and self.count >= self.max_solutions
-
     def submit(self, sol):
-        """入队一个 0-based 解；返回分配到的编号，超过上限返回 None。"""
+        """入队一个 0-based 解；返回分配到的编号，已关闭时返回 None。"""
         with self._lock:
-            if self._closed or self.full():
+            if self._closed:
                 return None
             index = self.count
             self.count += 1

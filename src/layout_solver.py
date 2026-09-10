@@ -487,18 +487,15 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--output", default=None,
                     help="SVG 文件名前缀")
-    ap.add_argument("--max-solutions", type=int, default=200,
-                    help="最多输出多少个可行解（0 = 不限）")
     args = ap.parse_args()
     cfg = json.load(open(args.config, encoding="utf-8"))
     cfg["_config_path"] = args.config
 
     base = args.output or layout_viz.default_output_prefix(args.config)
     os.makedirs(os.path.dirname(os.path.abspath(base)) or ".", exist_ok=True)
-    writer = layout_viz.SolutionWriter(cfg, base,
-                                       max_solutions=args.max_solutions)
+    writer = layout_viz.SolutionWriter(cfg, base)
     print(f"[heuristic] 增量输出目录: {os.path.dirname(os.path.abspath(base))}"
-          f"（找到可行解即写盘，最多 {args.max_solutions or '不限'} 个）",
+          f"（找到可行解即写盘，数量不限）",
           flush=True)
 
     solver = Solver(cfg, seed=args.seed)
