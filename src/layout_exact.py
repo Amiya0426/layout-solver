@@ -521,18 +521,22 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
     solver.parameters.log_search_progress = verbose
     # 关于目标边界，只做一件事：用上次的 cost C 收紧**上界**。
     #
-    # 为什么绝不动下界：目标函数是整数，且已知存在一个 cost=C 的解，所以
-    # “若存在严格更优解，则其 cost >= C+1”这句话本身没错；但把它写成硬约束
-    # `obj >= C+1` 就错了——那是把结论当成了前提。一旦 C 已经是全局最优，
-    # 就得到 obj<=C 与 obj>=C+1 同时成立，模型直接 INFEASIBLE，整轮搜索报废。
-    # 而且 AddHint 只是建议、不是保证：CP-SAT 会打印 “solution hint is
-    # incomplete”，说明它并未真正采用那个赋值为解；hint 变量齐全也**不能**
-    # 证明该解满足当前模型的所有约束。
+    # 注意目标是 **最小化**（格数越少越好），所以：
+    #     严格更优  <=>  obj <= C - 1
+    #     严格更差  <=>  obj >= C + 1
+    # 方向别搞反：想“只找更优解”就要压**上界**到 C-1，而不是抬下界。
     #
-    # 所以下界一律交给 CP-SAT 自己推理（日志里的 next:[lb,ub] 就是它的上下界）。
-    # 想让“只找更优解”生效，正确写法是再压上界，而不是压上界：
-    #   --hint-strict  ->  obj <= C-1
-    # 这样 next:[lb, C-1] 永远不会自相矛盾；若确无更优解，返回 INFEASIBLE
+    # 为什么不动下界：已知存在 cost=C 的解，由此并不能断言一定存在更优解
+    # （C 可能已是全局最优）。若把下界硬抬到某个值，就可能与上界 obj<=C
+    # 直接矛盾（例如抬到 C+1），模型立刻 INFEASIBLE，整轮搜索报废。
+    # 而且 AddHint 只是建议、不是保证：CP-SAT 会打印 “solution hint is
+    # incomplete”，说明它并未真正采用那个赋值；hint 变量齐全也**不能**
+    # 证明该解满足当前模型的所有约束，所以“完整性检查”挡不住这类矛盾。
+    #
+    # 结论：下界一律交给 CP-SAT 自己推理（日志里的 next:[lb,ub] 就是它算的）。
+    #   --hint         ->  obj <= C      （不比上次差）
+    #   --hint-strict  ->  obj <= C-1    （只找严格更优）
+    # 这样 next:[lb, C 或 C-1] 永远不会自相矛盾；若确无更优解，返回 INFEASIBLE
     # 就是一个正确结论（上次的解已最优），而不是人为制造的矛盾。
     hint_note = ""
     if hint_info is not None and hint_info[0] is not None:
@@ -604,8 +608,9 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
         if strict_lb and hint_info is not None and hint_info[0] is not None:
             print(f"[exact] 注意：本次启用了「只找严格更优解」，目标上界被压到 "
                   f"cost<={int(hint_info[0]) - 1}（上次是 {int(hint_info[0])}）。"
-                  f"INFEASIBLE 意味着上次那个解已经是**最优**；"
-                  f"UNKNOWN 则是时间不够证明。上一次的结果文件保持原样。",
+                  f"INFEASIBLE = 已证明不存在更优解，即上次那个解就是**最优**；"
+                  f"UNKNOWN = 在时间上限内没能证明完（不代表上次一定最优，"
+                  f"可以加大 --time-limit 再试）。上一次的结果文件保持原样。",
                   flush=True)
         else:
             print("[exact] 上一次的结果保持不变", flush=True)
