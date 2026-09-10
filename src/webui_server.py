@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 本地 WebUI 服务端（只用标准库）
@@ -561,14 +561,40 @@ def collect_results(name):
     }
 
 
+class Server(ThreadingHTTPServer):
+    """关闭 SO_REUSEADDR 的 HTTP 服务。
+
+    标准库 HTTPServer 默认 allow_reuse_address = 1（SO_REUSEADDR）。在 Windows 上
+    这个选项会让**第二个**进程也能绑定同一个端口且不报错，于是旧的僵尸服务继续
+    接管请求、新进程却毫无提示——表现为浏览器一直 404 或页面空白。关掉它，
+    端口被占用时就会明确失败。
+    """
+    allow_reuse_address = False
+    daemon_threads = True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"WebUI: http://{args.host}:{args.port}/")
-    print("Ctrl+C 停止")
+    # 路径可能被移动过，先自检一遍，避免浏览器侧只看到 404 却不知原因
+    for label, path in (("前端目录", UI_DIR), ("配置目录", CONFIG_DIR)):
+        if not os.path.isdir(path):
+            print(f"[警告] {label}不存在: {path}")
+    try:
+        srv = Server((args.host, args.port), Handler)
+    except OSError as e:
+        # 最常见的原因：端口已被占用（例如上一个服务还在后台跑）。
+        # 这时必须明确说出来，否则用户只会看到一个空白/404 的页面。
+        print(f"[错误] 无法在 {args.host}:{args.port} 启动服务: {e}")
+        print("       常见原因是该端口已被占用。请先结束旧进程，或换一个端口：")
+        print(f"         netstat -ano | findstr :{args.port}     (Windows 查占用)")
+        print(f"         python {os.path.join('src', 'webui_server.py')} "
+              f"--port {args.port + 1}")
+        raise SystemExit(1)
+    print(f"WebUI: http://{args.host}:{args.port}/", flush=True)
+    print("Ctrl+C 停止", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
