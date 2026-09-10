@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="608" height="344" viewBox="0 0 608 344" font-family="Segoe UI, Arial, sans-serif">
+<rect x="0" y="0" width="608" height="344" fill="white"/>
+<line x1="40" y1="40" x2="568" y2="40" stroke="#ddd" stroke-width="1"/>
+<line x1="40" y1="84" x2="568" y2="84" stroke="#ddd" stroke-width="1"/>
+<line x1="40" y1="128" x2="568" y2="128" stroke="#ddd" stroke-width="1"/>
+<line x1="40" y1="172" x2="568" y2="172" stroke="#ddd" stroke-width="1"/>
+<line x1="40" y1="216" x2="568" y2="216" stroke="#ddd" stroke-width="1"/>
+<line x1="40" y1="260" x2="568" y2="260" stroke="#ddd" stroke-width="1"/>
+<line x1="40" y1="304" x2="568" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="40" y1="40" x2="40" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="84" y1="40" x2="84" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="128" y1="40" x2="128" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="172" y1="40" x2="172" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="216" y1="40" x2="216" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="260" y1="40" x2="260" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="304" y1="40" x2="304" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="348" y1="40" x2="348" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="392" y1="40" x2="392" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="436" y1="40" x2="436" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="480" y1="40" x2="480" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="524" y1="40" x2="524" y2="304" stroke="#ddd" stroke-width="1"/>
+<line x1="568" y1="40" x2="568" y2="304" stroke="#ddd" stroke-width="1"/>
+<text x="62.0" y="32" text-anchor="middle" font-size="11" fill="#777">1</text>
+<text x="106.0" y="32" text-anchor="middle" font-size="11" fill="#777">2</text>
+<text x="150.0" y="32" text-anchor="middle" font-size="11" fill="#777">3</text>
+<text x="194.0" y="32" text-anchor="middle" font-size="11" fill="#777">4</text>
+<text x="238.0" y="32" text-anchor="middle" font-size="11" fill="#777">5</text>
+<text x="282.0" y="32" text-anchor="middle" font-size="11" fill="#777">6</text>
+<text x="326.0" y="32" text-anchor="middle" font-size="11" fill="#777">7</text>
+<text x="370.0" y="32" text-anchor="middle" font-size="11" fill="#777">8</text>
+<text x="414.0" y="32" text-anchor="middle" font-size="11" fill="#777">9</text>
+<text x="458.0" y="32" text-anchor="middle" font-size="11" fill="#777">10</text>
+<text x="502.0" y="32" text-anchor="middle" font-size="11" fill="#777">11</text>
+<text x="546.0" y="32" text-anchor="middle" font-size="11" fill="#777">12</text>
+<text x="32" y="66.0" text-anchor="end" font-size="11" fill="#777">1</text>
+<text x="32" y="110.0" text-anchor="end" font-size="11" fill="#777">2</text>
+<text x="32" y="154.0" text-anchor="end" font-size="11" fill="#777">3</text>
+<text x="32" y="198.0" text-anchor="end" font-size="11" fill="#777">4</text>
+<text x="32" y="242.0" text-anchor="end" font-size="11" fill="#777">5</text>
+<text x="32" y="286.0" text-anchor="end" font-size="11" fill="#777">6</text>
+<polyline points="194.0,194.0" fill="none" stroke="#1f77b4" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="194.0" cy="194.0" r="9" fill="white" stroke="#1f77b4" stroke-width="1.5"/>
+<text x="194.0" y="198.0" text-anchor="middle" font-size="11" font-weight="bold" fill="#1f77b4">S</text>
+<circle cx="194.0" cy="194.0" r="9" fill="white" stroke="#1f77b4" stroke-width="1.5"/>
+<text x="194.0" y="198.0" text-anchor="middle" font-size="11" font-weight="bold" fill="#1f77b4">E</text>
+<polyline points="370.0,238.0 414.0,238.0" fill="none" stroke="#ff7f0e" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="370.0" cy="238.0" r="9" fill="white" stroke="#ff7f0e" stroke-width="1.5"/>
+<text x="370.0" y="242.0" text-anchor="middle" font-size="11" font-weight="bold" fill="#ff7f0e">S</text>
+<circle cx="414.0" cy="238.0" r="9" fill="white" stroke="#ff7f0e" stroke-width="1.5"/>
+<text x="414.0" y="242.0" text-anchor="middle" font-size="11" font-weight="bold" fill="#ff7f0e">E</text>
+<polygon points="414.0,238.0 404.6,241.4 404.6,234.6" fill="#ff7f0e"/>
+<polyline points="370.0,194.0 370.0,150.0" fill="none" stroke="#2ca02c" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="370.0" cy="194.0" r="9" fill="white" stroke="#2ca02c" stroke-width="1.5"/>
+<text x="370.0" y="198.0" text-anchor="middle" font-size="11" font-weight="bold" fill="#2ca02c">S</text>
+<circle cx="370.0" cy="150.0" r="9" fill="white" stroke="#2ca02c" stroke-width="1.5"/>
+<text x="370.0" y="154.0" text-anchor="middle" font-size="11" font-weight="bold" fill="#2ca02c">E</text>
+<polygon points="370.0,150.0 373.4,159.4 366.6,159.4" fill="#2ca02c"/>
+<polyline points="414.0,62.0 370.0,62.0" fill="none" stroke="#d62728" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="414.0" cy="62.0" r="9" fill="white" stroke="#d62728" stroke-width="1.5"/>
+<text x="414.0" y="66.0" text-anchor="middle" font-size="11" font-weight="bold" fill="#d62728">S</text>
+<circle cx="370.0" cy="62.0" r="9" fill="white" stroke="#d62728" stroke-width="1.5"/>
+<text x="370.0" y="66.0" text-anchor="middle" font-size="11" font-weight="bold" fill="#d62728">E</text>
+<polygon points="370.0,62.0 379.4,58.6 379.4,65.4" fill="#d62728"/>
+<rect x="42" y="86" width="128" height="128" rx="8" fill="#eef3f9" stroke="#33475b" stroke-width="2"/>
+<text x="106.0" y="156.0" text-anchor="middle" font-size="15" font-weight="bold" fill="#24303c">FX</text>
+<rect x="218" y="174" width="128" height="128" rx="8" fill="#eef3f9" stroke="#33475b" stroke-width="2"/>
+<text x="282.0" y="244.0" text-anchor="middle" font-size="15" font-weight="bold" fill="#24303c">A</text>
+<rect x="394" y="86" width="128" height="128" rx="8" fill="#eef3f9" stroke="#33475b" stroke-width="2"/>
+<text x="458.0" y="156.0" text-anchor="middle" font-size="15" font-weight="bold" fill="#24303c">B</text>
+<rect x="218" y="42" width="128" height="128" rx="8" fill="#eef3f9" stroke="#33475b" stroke-width="2"/>
+<text x="282.0" y="112.0" text-anchor="middle" font-size="15" font-weight="bold" fill="#24303c">C</text>
+<line x1="150.0" y1="194.0" x2="194.0" y2="194.0" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="3,2"/>
+<circle cx="150.0" cy="194.0" r="10" fill="white" stroke="#1f77b4" stroke-width="2"/>
+<text x="150.0" y="198.0" text-anchor="middle" font-size="10" font-weight="bold" fill="#1f77b4">S1</text>
+<line x1="238.0" y1="194.0" x2="194.0" y2="194.0" stroke="#1f77b4" stroke-width="2.5" stroke-dasharray="3,2"/>
+<circle cx="238.0" cy="194.0" r="10" fill="white" stroke="#1f77b4" stroke-width="2"/>
+<text x="238.0" y="198.0" text-anchor="middle" font-size="10" font-weight="bold" fill="#1f77b4">E1</text>
+<line x1="326.0" y1="238.0" x2="370.0" y2="238.0" stroke="#ff7f0e" stroke-width="2.5" stroke-dasharray="3,2"/>
+<circle cx="326.0" cy="238.0" r="10" fill="white" stroke="#ff7f0e" stroke-width="2"/>
+<text x="326.0" y="242.0" text-anchor="middle" font-size="10" font-weight="bold" fill="#ff7f0e">S2</text>
+<line x1="414.0" y1="194.0" x2="414.0" y2="238.0" stroke="#ff7f0e" stroke-width="2.5" stroke-dasharray="3,2"/>
+<circle cx="414.0" cy="194.0" r="10" fill="white" stroke="#ff7f0e" stroke-width="2"/>
+<text x="414.0" y="198.0" text-anchor="middle" font-size="10" font-weight="bold" fill="#ff7f0e">E2</text>
+<line x1="326.0" y1="194.0" x2="370.0" y2="194.0" stroke="#2ca02c" stroke-width="2.5" stroke-dasharray="3,2"/>
+<circle cx="326.0" cy="194.0" r="10" fill="white" stroke="#2ca02c" stroke-width="2"/>
+<text x="326.0" y="198.0" text-anchor="middle" font-size="10" font-weight="bold" fill="#2ca02c">S3</text>
+<line x1="326.0" y1="150.0" x2="370.0" y2="150.0" stroke="#2ca02c" stroke-width="2.5" stroke-dasharray="3,2"/>
+<circle cx="326.0" cy="150.0" r="10" fill="white" stroke="#2ca02c" stroke-width="2"/>
+<text x="326.0" y="154.0" text-anchor="middle" font-size="10" font-weight="bold" fill="#2ca02c">E3</text>
+<line x1="414.0" y1="106.0" x2="414.0" y2="62.0" stroke="#d62728" stroke-width="2.5" stroke-dasharray="3,2"/>
+<circle cx="414.0" cy="106.0" r="10" fill="white" stroke="#d62728" stroke-width="2"/>
+<text x="414.0" y="110.0" text-anchor="middle" font-size="10" font-weight="bold" fill="#d62728">S4</text>
+<line x1="326.0" y1="62.0" x2="370.0" y2="62.0" stroke="#d62728" stroke-width="2.5" stroke-dasharray="3,2"/>
+<circle cx="326.0" cy="62.0" r="10" fill="white" stroke="#d62728" stroke-width="2"/>
+<text x="326.0" y="66.0" text-anchor="middle" font-size="10" font-weight="bold" fill="#d62728">E4</text>
+</svg>

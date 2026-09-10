@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 求解过程中的临时文件
+*.tmp
+*.solutions.jsonl.tmp
+
+# 注：result/ 是有价值的求解产物（SVG/字符画/JSONL），
+# 默认纳入版本管理；若不想提交请自行取消下一行注释。
+# result/

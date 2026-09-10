@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>布局求解 WebUI</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="title">模块布局 / 传送带求解</div>
+  <div class="toolbar">
+    <select id="problemSelect"></select>
+    <input id="problemName" placeholder="题目名，如 mytask">
+    <button id="btnLoad">载入</button>
+    <button id="btnNew">新建</button>
+    <button id="btnSave">保存</button>
+    <button id="btnSaveAs">另存为</button>
+    <label class="file-btn">导入<input type="file" id="fileImport" accept=".json" hidden></label>
+    <button id="btnExport">导出</button>
+    <a id="btnRefresh" class="button" href="#" onclick="loadProblems();return false;">刷新列表</a>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button data-tab="edit" class="active">题目编辑</button>
+  <button data-tab="solve">求解</button>
+  <button data-tab="result">结果</button>
+</nav>
+
+<main>
+<section id="tab-edit" class="tab active">
+  <div class="panel">
+    <h3>画布</h3>
+    <label>行 <input type="number" id="rows" min="1" value="9"></label>
+    <label>列 <input type="number" id="cols" min="1" value="17"></label>
+  </div>
+
+  <div class="two-col">
+    <div class="panel">
+      <h3>模块</h3>
+      <div id="moduleList" class="list"></div>
+      <div class="addbox">
+        <input id="newModId" placeholder="ID 如 J1">
+        <select id="newModKind">
+          <option value="movable">可动</option>
+          <option value="fixed">固定</option>
+        </select>
+        <input id="newModW" type="number" value="3" title="宽">
+        <input id="newModH" type="number" value="3" title="高">
+        <input id="newModR" type="number" value="0" title="固定行">
+        <input id="newModC" type="number" value="0" title="固定列">
+        <label class="inline"><input type="checkbox" id="newModRot" checked>可旋转</label>
+        <button id="btnAddModule">添加</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>选中模块 / 端口编辑</h3>
+      <div id="moduleEditor" class="muted">左侧点一个模块开始编辑</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>连接表</h3>
+    <div id="netList"></div>
+    <button id="btnAddNet">+ 添加连接</button>
+  </div>
+
+  <div class="panel">
+    <h3>固定模块预览</h3>
+    <div id="preview" class="grid-preview"></div>
+    <div class="muted">可动模块由求解器决定位置；灰色为可动，彩色为固定。</div>
+  </div>
+</section>
+
+<section id="tab-solve" class="tab">
+  <div class="panel">
+    <h3>求解</h3>
+    <label>模式
+      <select id="solveMode">
+        <option value="exact">精确最优 (CP-SAT)</option>
+        <option value="heuristic">启发式 (快速)</option>
+      </select>
+    </label>
+    <label>时间上限 <input type="number" id="solveTimeout" value="120" min="1"></label>
+    <label>线程 <input type="number" id="solveWorkers" value="8" min="1"></label>
+    <label>随机种子 <input type="number" id="solveSeed" min="0" placeholder="留空随机"></label>
+    <label>最多保存解 <input type="number" id="solveMaxSolutions" value="200" min="0" style="width:70px"></label>
+    <label class="inline" title="把该题目上次的最好解作为 CP-SAT 起点，再次求解时更快找到同级别解">
+      <input type="checkbox" id="solveHint">Warm start（用上次最好解做起点）</label>
+    <label class="inline" title="配合 Warm start：把目标下界也压到上次 cost+1，只搜索严格更优的解；若上次已是最优，可能搜不到解">
+      <input type="checkbox" id="solveHintStrict" disabled>只找严格更优解</label>
+    <button id="btnSolve" class="primary">开始求解</button>
+    <button id="btnPause" disabled>暂停</button>
+    <button id="btnStop" disabled>停止</button>
+    <span id="jobStatus" class="muted"></span>
+  </div>
+  <div class="panel">
+    <div class="muted">求解过程中每找到一个可行解就立刻写出 txt + svg，可以随时到“结果”页刷新查看；
+      暂停会把求解进程挂起（不占 CPU），但挂起时间仍计入时间上限。</div>
+  </div>
+  <div class="panel">
+    <h3>日志 <span id="logHint" class="muted"></span></h3>
+    <pre id="jobLog" class="log"></pre>
+  </div>
+</section>
+
+<section id="tab-result" class="tab">
+  <div class="panel row">
+    <h3>结果</h3>
+    <button id="btnReloadResults">刷新结果</button>
+    <label class="inline"><input type="checkbox" id="autoRefreshResults" checked>求解中自动刷新</label>
+    <span id="bgStatus" class="muted"></span>
+    <span id="resultSummary" class="muted"></span>
+  </div>
+  <div id="resultToolbar" class="result-toolbar"></div>
+  <div id="resultCards"></div>
+</section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+{"solution_index": 0, "cost": 7, "state": {"A": {"row": 4, "col": 5, "rotate": 0}, "B": {"row": 2, "col": 9, "rotate": 270}, "C": {"row": 1, "col": 5, "rotate": 180}}, "paths": [[[4, 4]], [[5, 8], [5, 9]], [[4, 8], [3, 8]], [[1, 9], [1, 8]]]}

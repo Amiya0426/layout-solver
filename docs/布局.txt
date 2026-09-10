@@ -1,0 +1,11 @@
+    01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17
+01  Y  Y  Y  Y  Y  Y  D  D  C  C  C  Y  Y  Y  Y  Y  Y
+02  Y  Y  Y  Y  Y  Y  D  D  C  C  C  Y  Y  Y  Y  Y  Y
+03  Y  Y  Y  Y  Y  Y  .  .  C  ↑  ↑  Y  Y  Y  Y  Y  Y
+04  ↓  Y  Y  Y  Y  Y  P  P  →  ↑  ↑  Y  Y  Y  Y  ↓  Y
+05  ↓  →  J  →  →  →  →  P  P  P  ↑  P  .  .  .  ↓  .
+06  .  J  J  J  .  .  P  P  P  P  P  P  .  .  .  ↓  .
+07  .  J  J  →  →  →  →  →  .  P  P  ↑  J  J  ←  ←  .
+08  C  C  C  .  S  S  ←  ↓  .  .  .  ←  ←  J  J  .  .
+09  C  C  C  .  S  S  S  .  .  .  .  ←  ←  J  J  .  .
+10  C  C  ←  ←  ←  S  ←  ←  ←  ←  ←  ↓  .  .  .  .  .

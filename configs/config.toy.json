@@ -1,0 +1,195 @@
+{
+  "rows": 6,
+  "cols": 12,
+  "fixed": [
+    {
+      "id": "FX",
+      "pos": [
+        1,
+        0
+      ],
+      "w": 3,
+      "h": 3,
+      "ports": [
+        {
+          "id": "OUT",
+          "cells": [
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ],
+            [
+              2,
+              2
+            ]
+          ],
+          "dir": "E"
+        }
+      ]
+    }
+  ],
+  "movable": [
+    {
+      "id": "A",
+      "w": 3,
+      "h": 3,
+      "rotatable": true,
+      "ports": [
+        {
+          "id": "IN",
+          "cells": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ]
+          ],
+          "dir": "W"
+        },
+        {
+          "id": "OUT",
+          "cells": [
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ],
+            [
+              2,
+              2
+            ]
+          ],
+          "dir": "E"
+        }
+      ]
+    },
+    {
+      "id": "B",
+      "w": 3,
+      "h": 3,
+      "rotatable": true,
+      "ports": [
+        {
+          "id": "IN",
+          "cells": [
+            [
+              0,
+              0
+            ],
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ]
+          ],
+          "dir": "W"
+        },
+        {
+          "id": "OUT",
+          "cells": [
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ],
+            [
+              2,
+              2
+            ]
+          ],
+          "dir": "E"
+        }
+      ]
+    },
+    {
+      "id": "C",
+      "w": 3,
+      "h": 3,
+      "rotatable": true,
+      "ports": [
+        {
+          "id": "IN",
+          "cells": [
+            [
+              1,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              0,
+              0
+            ]
+          ],
+          "dir": "W"
+        },
+        {
+          "id": "OUT",
+          "cells": [
+            [
+              0,
+              2
+            ],
+            [
+              1,
+              2
+            ],
+            [
+              2,
+              2
+            ]
+          ],
+          "dir": "E"
+        }
+      ]
+    }
+  ],
+  "nets": [
+    {
+      "from": "FX",
+      "from_port": "OUT",
+      "to": "A",
+      "to_port": "IN"
+    },
+    {
+      "from": "A",
+      "from_port": "OUT",
+      "to": "B",
+      "to_port": "IN"
+    },
+    {
+      "from": "A",
+      "from_port": "OUT",
+      "to": "C",
+      "to_port": "IN"
+    },
+    {
+      "from": "B",
+      "from_port": "OUT",
+      "to": "C",
+      "to_port": "IN"
+    }
+  ]
+}
