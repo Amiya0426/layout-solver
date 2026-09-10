@@ -460,7 +460,6 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
     # 通常能显著缩短再次搜到同类解的时间。同一个问题反复求解时最有用。
     prev_best = load_prev_best(hint_file) if (use_hint and hint_file) else None
     hint_info = None
-    hint_complete = False
     if prev_best is not None:
         # 1) 模块位姿：优先精确匹配 (pos, orient)，退化到只匹配位置
         exact_idx = {}
@@ -483,10 +482,8 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 model.AddHint(pvar[(mid, i)], 1)
         # 2) 端点：必须先确定该模块选中的候选，再匹配端口外侧格
         prev_paths = prev_best.get("paths") or []
-        hinted_ends = 0
 
         def hint_endpoint(ni, is_src, want):
-            nonlocal hinted_ends
             mid = nets[ni]["from" if is_src else "to"]
             pvar_list = p_src[ni] if is_src else p_dst[ni]
             cand_list = src_cands[ni] if is_src else dst_cands[ni]
@@ -504,7 +501,6 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                     hit = k
             if hit is not None:
                 model.AddHint(pvar_list[hit], 1)
-                hinted_ends += 1
 
         for ni in range(len(nets)):
             if ni >= len(prev_paths) or not prev_paths[ni]:
@@ -517,37 +513,39 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 cell = (int(r) - 1, int(c) - 1)
                 if (ni, cell) in use:
                     model.AddHint(use[(ni, cell)], 1)
-        # 只有当每个可动模块都选定了候选位姿、每条 net 的两个端点都定位成功时，
-        # 才能断定“上面那个 cost 的完整解确实存在于当前模型里”——下界才可用。
-        hint_complete = (len(picks) == len(movable_mods)
-                         and hinted_ends == 2 * len(nets))
         hint_info = (prev_best.get("cost"), len(picks))
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit
     solver.parameters.num_workers = workers
     solver.parameters.log_search_progress = verbose
-    # 已知存在一个 cost = hint_cost 的可行解，可以安全地把目标上界压到它，
-    # 让 CP-SAT 直接去找“不比上次差”的解。AddHint 本身不是硬约束，
-    # 这里的上界同样只影响搜索起点，不改变最优性判定。
+    # 关于目标边界，只做一件事：用上次的 cost C 收紧**上界**。
+    #
+    # 为什么绝不动下界：目标函数是整数，且已知存在一个 cost=C 的解，所以
+    # “若存在严格更优解，则其 cost >= C+1”这句话本身没错；但把它写成硬约束
+    # `obj >= C+1` 就错了——那是把结论当成了前提。一旦 C 已经是全局最优，
+    # 就得到 obj<=C 与 obj>=C+1 同时成立，模型直接 INFEASIBLE，整轮搜索报废。
+    # 而且 AddHint 只是建议、不是保证：CP-SAT 会打印 “solution hint is
+    # incomplete”，说明它并未真正采用那个赋值为解；hint 变量齐全也**不能**
+    # 证明该解满足当前模型的所有约束。
+    #
+    # 所以下界一律交给 CP-SAT 自己推理（日志里的 next:[lb,ub] 就是它的上下界）。
+    # 想让“只找更优解”生效，正确写法是再压上界，而不是压上界：
+    #   --hint-strict  ->  obj <= C-1
+    # 这样 next:[lb, C-1] 永远不会自相矛盾；若确无更优解，返回 INFEASIBLE
+    # 就是一个正确结论（上次的解已最优），而不是人为制造的矛盾。
     hint_note = ""
     if hint_info is not None and hint_info[0] is not None:
         hint_cost = int(hint_info[0])
-        model.Add(obj <= hint_cost)
-        hint_note = (f"，已用上次最好解作为 Hint (cost={hint_cost}, "
-                     f"匹配模块 {hint_info[1]} 个")
-        # 下界：目标函数是整数，且已知存在 cost = hint_cost 的解，
-        # 那么“任何严格更优的解”其 cost 必 >= hint_cost + 1。
-        # 把下界也压到 hint_cost + 1，等价于告诉求解器“只找比上次更好的解”，
-        # 可以把“等于上次”的那一大批解整片剪掉。
-        # 但这要求 hint 是**完整**的（否则不能断定该解在当前模型里存在，
-        # 压下界就可能把真正的最优解一起剪掉，甚至误报不可行）。
-        if strict_lb and hint_complete:
-            model.Add(obj >= hint_cost + 1)
-            hint_note += "，并要求严格优于上次"
-        elif strict_lb and not hint_complete:
-            hint_note += "，Hint 不完整，已跳过下界收紧"
-        hint_note += ")"
+        if strict_lb:
+            model.Add(obj <= hint_cost - 1)
+            hint_note = (f"，已用上次最好解作为 Hint (cost={hint_cost}, "
+                         f"匹配模块 {hint_info[1]} 个)，只搜索严格更优的解 "
+                         f"(obj <= {hint_cost - 1})")
+        else:
+            model.Add(obj <= hint_cost)
+            hint_note = (f"，已用上次最好解作为 Hint (cost={hint_cost}, "
+                         f"匹配模块 {hint_info[1]} 个)")
     print(
         f"[exact] 模型构建完成: {len(all_cells)} 个可用格点, "
         f"开始 CP-SAT 搜索 (time_limit={time_limit:.1f}s, workers={workers})"
@@ -604,8 +602,8 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         print("[exact] 无可行解，status =", solver.StatusName(status), flush=True)
         if strict_lb and hint_info is not None and hint_info[0] is not None:
-            print(f"[exact] 注意：本次启用了「只找严格更优解」，而上界/下界锁在 "
-                  f"cost={int(hint_info[0])} 与 cost>={int(hint_info[0]) + 1} 之间。"
+            print(f"[exact] 注意：本次启用了「只找严格更优解」，目标上界被压到 "
+                  f"cost<={int(hint_info[0]) - 1}（上次是 {int(hint_info[0])}）。"
                   f"INFEASIBLE 意味着上次那个解已经是**最优**；"
                   f"UNKNOWN 则是时间不够证明。上一次的结果文件保持原样。",
                   flush=True)
