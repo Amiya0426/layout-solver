@@ -163,6 +163,33 @@ def _mem_text():
     return f"，进程内存 {mb / 1024.0:.2f}GB" if mb else ""
 
 
+def legal_length_bounds(nets, src_end, dst_end):
+    """逐条 net 的**合法**路径长度下界（占用格数），返回 [下界...]。
+
+    两条依据都是原始语义的直接推论：
+
+    1. 每条 net 恰好一个起点格（`Σ_cell 起点变量 == 1`），而 `use >= 起点变量`，
+       所以它至少占 1 格；
+    2. 路径四邻接连通，从起点格走到终点格至少要 `曼哈顿距离` 步，
+       所以占用格数 >= 曼哈顿距离 + 1（有模块挡路只会更长）。
+       起点/终点都只在「候选可能落到的那组格」里选，取这组格的最小距离即可。
+
+    写进模型不会切掉任何可行解，只是把求解器要自己爬很久的界直接告诉它
+    （见 solve_exact 里的「合法冗余下界」）。空 nets 时返回 []。
+    """
+    out = []
+    for ni in range(len(nets)):
+        s_cells = list(src_end[ni]) if ni < len(src_end) else []
+        d_cells = list(dst_end[ni]) if ni < len(dst_end) else []
+        if not s_cells or not d_cells:
+            out.append(1)
+            continue
+        dmin = min(abs(a[0] - b[0]) + abs(a[1] - b[1])
+                   for a in s_cells for b in d_cells)
+        out.append(dmin + 1)
+    return out
+
+
 class SolutionSaver(cp_model.CpSolverSolutionCallback):
     """CP-SAT 每报出一个可行解，就立刻交给 on_solution 输出。
 
@@ -715,6 +742,24 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
     obj = sum(use[(ni, cell)] for ni in range(len(nets)) for cell in all_cells)
     model.Minimize(obj)
     blog("目标函数：最小化传送带占用格总数")
+
+    # ---------- 合法冗余下界 ----------
+    # obj = Σ_net Σ_cell use，而每条 net 恰好有一个起点格、且 use >= 起点变量，
+    # 所以 obj >= net 条数；更进一步，路径格数 >= 起点格到终点格的曼哈顿距离 + 1。
+    # 两条都是**模型的推论**（写出来不会切掉任何可行解），但求解器自己往往要几百秒
+    # 才能爬到同样的值：实测 config.example.json（9 条 net）不加时 224s 才爬到 9，
+    # 加上之后一开始就是 next:[9, …]。
+    lb_per_net = legal_length_bounds(nets, src_end, dst_end)
+    total_lb = sum(lb_per_net)
+    for ni, lbn in enumerate(lb_per_net):
+        if lbn > 1:
+            model.Add(sum(use[(ni, cell)] for cell in all_cells) >= lbn)
+    if total_lb > 0:
+        model.Add(obj >= total_lb)
+        blog(f"合法下界 obj >= {total_lb}"
+             f"（每条 net 至少 1 格 = {len(nets)}，"
+             f"端点曼哈顿距离再加 {total_lb - len(nets)}）")
+
     # 规模统计（ModelStats 要遍历整个模型，大模型上本身也要一两秒，单独记一行）
     size = _model_size_text(model)
     if size:

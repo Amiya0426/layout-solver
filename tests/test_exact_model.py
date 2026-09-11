@@ -190,6 +190,7 @@ BUILD_STEPS = [
     "同格共带/交叉约束",
     "模块禁带约束",
     "目标函数",
+    "合法下界",
     "模型规模",
     "模型构建完成",
 ]
@@ -218,6 +219,9 @@ def run_case(rep, name, time_limit=30.0, expect_cost=None):
     problems = validate(cfg, res, tag=name)
     rep.check(f"{name}: 解满足原始语义（不重叠/连通/不穿模块/共格直通/cost 一致）",
               not problems, "; ".join(problems[:4]))
+    rep.check(f"{name}: 已证下界不低于「每条 net 至少 1 格」",
+              res.get("lb") is not None and res["lb"] >= len(cfg["nets"]),
+              f"lb={res.get('lb')} nets={len(cfg['nets'])}")
     rep.check(f"{name}: status=OPTIMAL 且 cost==已证下界", res["status"] == "OPTIMAL"
               and res["cost"] == res.get("lb"),
               f"status={res['status']} cost={res['cost']} lb={res.get('lb')}")
