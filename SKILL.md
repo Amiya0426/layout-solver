@@ -28,6 +28,19 @@ description: 在「模块布点 + 传送带布线」求解器仓库里改代码�
 - WebUI 用 `sys.executable` 起子进程，**用它启动 WebUI 的那个解释器就是跑求解器的解释器**。
 - `config.gudi.json` 的精确模型约占 1GB 内存、`--workers` 吃满核；一次只跑一个重活。
 
+文件地图（README 里不再列这些细节，改代码前对着看）：
+
+| 文件 | 干什么 |
+| --- | --- |
+| `src/layout_exact.py` | 精确最优求解器（CP-SAT）：建模 + 两阶段 + 上下界与 warm start |
+| `src/layout_solver.py` | 启发式求解器（模拟退火 + 逐条布线），零第三方依赖 |
+| `src/layout_viz.py` | SVG / 字符画渲染 + `SolutionWriter`（后台线程边求解边落盘）+ `default_output_prefix()` |
+| `src/proc_ctl.py` | 跨平台 暂停/恢复 子进程（WebUI 的暂停按钮） |
+| `src/device_presets.py` | 设备尺寸表 xlsx -> 模块预设（只用标准库解析 xlsx） |
+| `src/webui_server.py` + `ui/` | 图形界面服务端与前端（`ui/model.js` 是不碰 DOM 的纯逻辑，可单测） |
+| `tests/` | `test_smoke` / `test_exact_model` / `test_presets` / `test_webui_*` + 三个探针（warmstart / stop_bound / webui_presets） |
+| `docs/` | 深度文档：`exact-model` / `warm-start` / `cp-sat-log` / `heuristic` / `config-format` / `webui` / `outputs` |
+
 ## 2. 命令速查（含验收）
 
 | 目的 | 命令 | 通过标准 |
