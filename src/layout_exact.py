@@ -231,6 +231,48 @@ class SolutionSaver(cp_model.CpSolverSolutionCallback):
         )
 
 
+class RelaxRecorder(cp_model.CpSolverSolutionCallback):
+    """两阶段求解的**阶段1**（松弛模型）用：只记下最有用的那个松弛解，不写盘。
+
+    松弛模型丢掉了「共格只能一横一纵十字直通」这层细则，所以它的解可能不合法：
+    既不能当结果输出，也不能当目标上界（它的 cost 可能低于真正的最优值）。
+    它只有两个用途：
+
+      1. 给阶段2 当 Hint ——CP-SAT 会拿它去 repair，比从零搜索强得多；
+      2. 提供**合法下界** ——松弛问题的最优值一定 <= 原问题最优值。
+
+    挑哪个解留给阶段2？**按违规格数优先、再按 cost**：最便宜的那个解往往在
+    很多格上叠了带（违规多），拿去 repair 反而更难；违规最少（最好是 0）的
+    骨架才是好 Hint。违规数由 violations 回调算（传 None 就退化成只按 cost）。
+
+    找到合法解也不提前收工：阶段1 的预算本来就只有总时间的 35%，继续跑能把
+    松弛问题的界证得更紧（小题目上往往能直接证到最优值），阶段2 拿这个界
+    几乎立刻就能收尾——实测 toy 因此从 9.2s 回到 5.7s。
+    """
+
+    def __init__(self, builder, violations=None):
+        super().__init__()
+        self.builder = builder
+        self.violations = violations
+        self.best = None
+        self.best_viol = None       # int：违规格数
+        self.best_vac = []          # 违规明细（日志用）
+        self.count = 0
+
+    def OnSolutionCallback(self):
+        try:
+            sol = self.builder(self)
+        except Exception:  # noqa: BLE001  取不出解就跳过，不影响搜索
+            return
+        self.count += 1
+        vac = self.violations(self) if self.violations is not None else []
+        v = len(vac)
+        if self.best is None or (v, sol["cost"]) < (self.best_viol, self.best["cost"]):
+            self.best = sol
+            self.best_viol = v
+            self.best_vac = vac
+
+
 class Module:
     def __init__(self, mid, cfg, fixed_pos=None):
         self.id = mid
@@ -386,11 +428,15 @@ def load_prev_bound(prefix, cfg, quiet=False):
     return rec
 
 
-def save_prev_bound(prefix, cfg, lb, best, status, solve_sec, applied=None):
+def save_prev_bound(prefix, cfg, lb, best, status, solve_sec, applied=None,
+                    lb_relax=None):
     """把**已证明**的目标下界落盘，供下次同配置求解复用。
 
     - 只增不减：新界比旧界小的话保留旧界（旧界同样有效，没必要退回去）；
     - 只有 lb > 0 才写；INFEASIBLE 的那一轮不写（那种“界”没有意义）。
+    - `lb_relax` 是两阶段里**阶段1 松弛模型**证出的下界，单独存一个字段：
+      它对完整模型同样成立（松弛问题的最优值 <= 原问题最优值），但来源不同，
+      分开记便于排查“这个界到底是谁给的”。
     """
     if not prefix or lb is None:
         return None
@@ -411,8 +457,14 @@ def save_prev_bound(prefix, cfg, lb, best, status, solve_sec, applied=None):
         prev_best = prev.get("best")
         if isinstance(prev_best, int) and not isinstance(prev_best, bool):
             best = prev_best if best is None else min(int(best), prev_best)
+        # 松弛下界同样只增不减
+        prev_relax = prev.get("lb_relax")
+        if isinstance(prev_relax, int) and not isinstance(prev_relax, bool):
+            lb_relax = (prev_relax if lb_relax is None
+                        else max(int(lb_relax), prev_relax))
     rec = {
         "lb": lb,
+        "lb_relax": None if lb_relax is None else int(lb_relax),
         "best": None if best is None else int(best),
         "status": status,
         "solve_sec": round(float(solve_sec), 3),
@@ -435,7 +487,8 @@ def save_prev_bound(prefix, cfg, lb, best, status, solve_sec, applied=None):
 
 
 def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
-                on_solution=None, hint_file=None, use_hint=False):
+                on_solution=None, hint_file=None, use_hint=False,
+                relax_phase=True):
     blog = BuildLog()   # 建模进度日志：每条都带累计/本步耗时
     rows, cols = cfg["rows"], cfg["cols"]
     fixed_mods = []
@@ -713,23 +766,41 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
     #   H + V >= 2T - 2 连同 H<=1、V<=1 => 恰好一条横、一条纵
     #   E + 2T <= 4                  => 交叉格不能是端点
     # T<=1 时这几条都是恒真式，所以不会误伤单条带的情形。
-    blog("同格共带/交叉约束（按格聚合，替代逐对 share 变量）")
-    tvar = {}   # cell -> IntVar 该格的带数
+    #
+    # 这层细则**故意先不加**（见 add_share_constraints）：它正是最难满足的一层，
+    # 先解不含它的松弛模型能很快拿到骨架和下界（阶段1），补回来再求最优（阶段2）。
+    if relax_phase and nets:
+        blog("同格共带/交叉约束：两阶段求解——阶段1 先不加（松弛），阶段2 再补")
+    else:
+        blog("同格共带/交叉约束：本次直接全加（不走两阶段）")
+    tvar = {}   # cell -> IntVar 该格的带数（松弛模型里也用它做 Hint / 违规检查）
     for cell in all_cells:
         T = model.NewIntVar(0, 2, f"t_{cell_idx[cell]}")
         model.Add(T == sum(use[(ni, cell)] for ni in range(len(nets))))
         tvar[cell] = T
-        hs = [hcomp[(ni, cell)] for ni in range(len(nets))]
-        vs = [vcomp[(ni, cell)] for ni in range(len(nets))]
-        es = [src_end[ni].get(cell, 0) for ni in range(len(nets))]
-        es += [dst_end[ni].get(cell, 0) for ni in range(len(nets))]
-        model.Add(sum(hs) <= 1)
-        model.Add(sum(vs) <= 1)
-        model.Add(sum(hs) + sum(vs) >= 2 * T - 2)
-        model.Add(sum(es) + 2 * T <= 4)
-        for ni in range(len(nets)):
-            model.Add(use[(ni, cell)] + T
-                      <= 2 + hcomp[(ni, cell)] + vcomp[(ni, cell)])
+
+    def add_share_constraints():
+        """把「共格只能一横一纵十字直通、交叉格不能是端点」补进模型（阶段2）。
+
+        这一层是原始语义的一部分，补回来之后模型与从前完全一致；去掉它的版本是
+        原问题的**松弛**（可行解更多），所以阶段1 得到的解可能违反细则——
+        既不能当结果输出，也不能拿来当目标上界，只能当 Hint 和**合法下界**
+        （松弛问题的最优值 <= 原问题最优值）。返回补了多少格。
+        """
+        for cell in all_cells:
+            T = tvar[cell]
+            hs = [hcomp[(ni, cell)] for ni in range(len(nets))]
+            vs = [vcomp[(ni, cell)] for ni in range(len(nets))]
+            es = [src_end[ni].get(cell, 0) for ni in range(len(nets))]
+            es += [dst_end[ni].get(cell, 0) for ni in range(len(nets))]
+            model.Add(sum(hs) <= 1)
+            model.Add(sum(vs) <= 1)
+            model.Add(sum(hs) + sum(vs) >= 2 * T - 2)
+            model.Add(sum(es) + 2 * T <= 4)
+            for ni in range(len(nets)):
+                model.Add(use[(ni, cell)] + T
+                          <= 2 + hcomp[(ni, cell)] + vcomp[(ni, cell)])
+        return len(all_cells)
 
     # 模块占用格不能被带穿过
     # （原来这里是 模块候选格数 x net 数 条约束，现在是 格数 x net 数）
@@ -808,6 +879,14 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
     lb = None
     if prev_bound is not None:
         lb = int(prev_bound["lb"])
+        # 上一轮两阶段里阶段1 证出的松弛下界：来源不同，但对完整模型同样成立，
+        # 单独记在 lb_relax 字段（见 save_prev_bound），这里取两者更紧的那个用。
+        prev_relax = prev_bound.get("lb_relax")
+        if isinstance(prev_relax, int) and not isinstance(prev_relax, bool):
+            if prev_relax > lb:
+                print(f"[exact] 历史松弛下界 lb_relax={prev_relax} 比 lb={lb} 更紧："
+                      f"这次用它抬下界", flush=True)
+                lb = prev_relax
         if ub is not None and lb > ub:
             print(f"[exact] 忽略历史下界 {lb}：大于本次上界 {ub}，"
                   f"历史数据自相矛盾", flush=True)
@@ -818,83 +897,60 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
             if ub is not None and lb == ub:
                 notes.append("上下界重合=已证该值最优")
 
-    def apply_full_hint():
-        """把历史最好解翻译成**每个变量**的取值，做成完整 Hint。
+    def exact_pick(mid, pos, orient):
+        """(位置, 旋转) -> 候选序号；不在当前候选集合里返回 None。"""
+        want = (tuple(pos), int(orient) % 360)
+        for i, cand in enumerate(cands[mid]):
+            if (tuple(cand["pos"]), cand["orient"]) == want:
+                return i
+        return None
 
-        全给上之后，CP-SAT 要么直接把它当成 incumbent（presolve 阶段、
-        搜索都不用开始），要么发现它不可行而去 repair；只给一部分变量的话
-        它得另起一个 “hint search” 子求解器补全，路径怎么连通这部分信息
-        就白丢了（历史上就是这个问题）。
-        返回 (统计 dict, None) 或 (None, 放弃原因)。
+    def share_violations(slv):
+        """数出这个解违反「共格只能一横一纵十字直通」的格，返回 [(格, T, H, V, E)]。
+
+        空列表 = 这个解在共格细则上是合法的（其余约束本来就在模型里）。
+        两阶段求解用它判断阶段1 的松弛解能不能直接当结果。
         """
-        state = prev_best.get("state") or {}
-        prev_paths = prev_best.get("paths") or []
-        if len(prev_paths) < len(nets):
-            return None, f"历史解只有 {len(prev_paths)} 条路径，当前有 {len(nets)} 条"
+        def val(x):
+            return 0 if isinstance(x, int) else int(slv.Value(x))
 
-        # 1) 模块位姿：必须 (位置, 旋转) 精确对上，对不上就整个放弃
-        exact_idx = {}
-        for m in movable_mods:
-            for i, cand in enumerate(cands[m.id]):
-                exact_idx[(m.id, tuple(cand["pos"]), cand["orient"])] = i
-        picks = {}
-        for m in movable_mods:
-            v = state.get(m.id)
-            if not isinstance(v, dict):
-                return None, f"历史解里没有模块 {m.id} 的位姿"
-            pos = (int(v["row"]) - 1, int(v["col"]) - 1)
-            orient = int(v.get("rotate", 0)) % 360
-            i = exact_idx.get((m.id, pos, orient))
-            if i is None:
-                return None, (f"模块 {m.id} 的位姿 pos={pos} rotate={orient} "
-                              f"在当前候选里不存在（配置改过？）")
-            picks[m.id] = i
+        bad = []
+        for cell in all_cells:
+            T = sum(int(slv.Value(use[(ni, cell)])) for ni in range(len(nets)))
+            if T <= 1:
+                continue
+            H = sum(val(hcomp[(ni, cell)]) for ni in range(len(nets)))
+            V = sum(val(vcomp[(ni, cell)]) for ni in range(len(nets)))
+            E = sum(val(src_end[ni].get(cell, 0)) + val(dst_end[ni].get(cell, 0))
+                    for ni in range(len(nets)))
+            if T == 2 and H == 1 and V == 1 and E == 0:
+                continue
+            bad.append((cell, T, H, V, E))
+        return bad
 
-        # 2) 路径转 0-based 并校验首尾相接
-        paths = []
-        for ni in range(len(nets)):
-            pts = prev_paths[ni]
-            if not pts:
-                return None, f"net {ni} 的历史路径为空"
-            cells = [(int(r) - 1, int(c) - 1) for r, c in pts]
-            for u, v in zip(cells, cells[1:]):
-                if v not in neighbors.get(u, []):
-                    return None, f"net {ni} 的历史路径不连通: {u} -> {v}"
-            paths.append(cells)
-        pos_in_path = [{cell: i for i, cell in enumerate(p)} for p in paths]
-        on_path = [set(p) for p in paths]
+    def add_hints(picks, paths):
+        """把一份解（模块候选序号 + 每条 net 的路径格）翻译成**每个变量**的 Hint。
 
-        # 3) 端点：必须能在当前候选里精确命中（模块也用上面的精确位姿）
-        for ni in range(len(nets)):
-            fm = modules[nets[ni]["from"]]
-            tm = modules[nets[ni]["to"]]
-            want_s = paths[ni][0]
-            want_d = paths[ni][-1]
-            ok_s = (want_s in src_cover[ni]
-                    and (fm.fixed or picks.get(fm.id) in src_cover[ni][want_s]))
-            ok_d = (want_d in dst_cover[ni]
-                    and (tm.fixed or picks.get(tm.id) in dst_cover[ni][want_d]))
-            if not ok_s or not ok_d:
-                return None, (f"net {ni} 的端点 {want_s} -> "
-                              f"{want_d} 在候选里对不上")
-
+        全给上之后，CP-SAT 要么直接把它当成 incumbent（presolve 阶段、搜索都不用
+        开始），要么发现它不可行而去 repair；只给一部分变量的话它得另起一个
+        “hint search” 子求解器补全，路径怎么连通这部分信息就白丢了。
+        返回提示了多少个变量。
+        """
         n = 0
-        # 4) 模块候选：选中的 1，其余 0
         for m in movable_mods + fixed_mods:
             for i in range(len(cands[m.id])):
                 model.AddHint(pvar[(m.id, i)],
                               1 if (m.fixed or picks.get(m.id) == i) else 0)
                 n += 1
-        # 4b) 每格占用：历史解里被某个模块占住的格为 1
-        hist_used = set()
+        used_cells = set()
         for m in movable_mods:
             i = picks.get(m.id)
             if i is not None:
-                hist_used.update(cands[m.id][i]["cells"])
+                used_cells.update(cands[m.id][i]["cells"])
         for cell, b in occ_var.items():
-            model.AddHint(b, 1 if cell in hist_used else 0)
+            model.AddHint(b, 1 if cell in used_cells else 0)
             n += 1
-        # 5) 端点格：命中的 1，其余 0
+        on_path = [set(p) for p in paths]
         for ni in range(len(nets)):
             for cell, v in src_end[ni].items():
                 model.AddHint(v, 1 if cell == paths[ni][0] else 0)
@@ -902,18 +958,15 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
             for cell, v in dst_end[ni].items():
                 model.AddHint(v, 1 if cell == paths[ni][-1] else 0)
                 n += 1
-        # 6) use：路径格 1，其余 0
         for ni in range(len(nets)):
             for cell in all_cells:
                 model.AddHint(use[(ni, cell)],
                               1 if cell in on_path[ni] else 0)
                 n += 1
-        # 6b) T：该格上历史解的带数
         for cell in all_cells:
             model.AddHint(tvar[cell],
                           sum(1 for ni in range(len(nets)) if cell in on_path[ni]))
             n += 1
-        # 7) arc：路径上相邻格对 1，其余 0
         arc_on = set()
         for ni in range(len(nets)):
             for u, v in zip(paths[ni], paths[ni][1:]):
@@ -921,7 +974,7 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
         for key in arc:
             model.AddHint(arc[key], 1 if key in arc_on else 0)
             n += 1
-        # 8) hcomp/vcomp：由“从哪进、往哪出”唯一确定
+        pos_in_path = [{cell: i for i, cell in enumerate(p)} for p in paths]
         for (ni, cell), cv in comp_vars.items():
             r, c = cell
             idx = pos_in_path[ni].get(cell)
@@ -944,6 +997,56 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 n += 1
         # （原来第 9 步还要给 84 万个 share 变量逐个 AddHint，
         #   聚合写法下这些变量已经不存在了。）
+        return n
+
+    def apply_full_hint():
+        """把历史最好解翻译成完整 Hint。返回 (统计 dict, None) 或 (None, 放弃原因)。"""
+        state = prev_best.get("state") or {}
+        prev_paths = prev_best.get("paths") or []
+        if len(prev_paths) < len(nets):
+            return None, f"历史解只有 {len(prev_paths)} 条路径，当前有 {len(nets)} 条"
+
+        # 1) 模块位姿：必须 (位置, 旋转) 精确对上，对不上就整个放弃
+        picks = {}
+        for m in movable_mods:
+            v = state.get(m.id)
+            if not isinstance(v, dict):
+                return None, f"历史解里没有模块 {m.id} 的位姿"
+            pos = (int(v["row"]) - 1, int(v["col"]) - 1)
+            orient = int(v.get("rotate", 0)) % 360
+            i = exact_pick(m.id, pos, orient)
+            if i is None:
+                return None, (f"模块 {m.id} 的位姿 pos={pos} rotate={orient} "
+                              f"在当前候选里不存在（配置改过？）")
+            picks[m.id] = i
+
+        # 2) 路径转 0-based 并校验首尾相接
+        paths = []
+        for ni in range(len(nets)):
+            pts = prev_paths[ni]
+            if not pts:
+                return None, f"net {ni} 的历史路径为空"
+            cells = [(int(r) - 1, int(c) - 1) for r, c in pts]
+            for u, v in zip(cells, cells[1:]):
+                if v not in neighbors.get(u, []):
+                    return None, f"net {ni} 的历史路径不连通: {u} -> {v}"
+            paths.append(cells)
+
+        # 3) 端点：必须能在当前候选里精确命中（模块也用上面的精确位姿）
+        for ni in range(len(nets)):
+            fm = modules[nets[ni]["from"]]
+            tm = modules[nets[ni]["to"]]
+            want_s = paths[ni][0]
+            want_d = paths[ni][-1]
+            ok_s = (want_s in src_cover[ni]
+                    and (fm.fixed or picks.get(fm.id) in src_cover[ni][want_s]))
+            ok_d = (want_d in dst_cover[ni]
+                    and (tm.fixed or picks.get(tm.id) in dst_cover[ni][want_d]))
+            if not ok_s or not ok_d:
+                return None, (f"net {ni} 的端点 {want_s} -> "
+                              f"{want_d} 在候选里对不上")
+
+        n = add_hints(picks, paths)
         return {
             "cost": hint_cost,
             "modules": len(picks),
@@ -964,25 +1067,13 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
             blog(f"Hint 施加完成: {hint_stat['hints']} 个变量, "
                  f"共耗时 {time.perf_counter() - t_hint:.1f}s")
 
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = time_limit
-    solver.parameters.num_workers = workers
-    solver.parameters.log_search_progress = verbose
-
-    hint_note = ""
-    if notes:
-        hint_note = "，warm start：" + " + ".join(notes)
-    if hint_stat is not None:
-        hint_note += (f"；完整 Hint cost={hint_stat['cost']}, "
-                      f"模块 {hint_stat['modules']} 个, "
-                      f"路径 {hint_stat['nets']} 条/{hint_stat['cells']} 格, "
-                      f"共 hint {hint_stat['hints']} 个变量")
     print(
         f"[exact] 模型构建完成: {len(all_cells)} 个可用格点, "
         f"{size or '规模未知'}, 建模总耗时 {time.perf_counter() - blog.t0:.1f}s"
-        f"{_mem_text()}；开始 CP-SAT 搜索 "
-        f"(time_limit={time_limit:.1f}s, workers={workers})"
-        + hint_note,
+        f"{_mem_text()}；开始求解 (time_limit={time_limit:.1f}s, "
+        f"workers={workers})"
+        + ("；两阶段：阶段1 先解松弛模型（不含共格细则），阶段2 补回来求最优"
+           if relax_phase and nets and hint_stat is None else ""),
         flush=True,
     )
     print("[exact] 提示：CP-SAT 会先做一轮 presolve，模型大时这一步可能几十秒"
@@ -1036,19 +1127,154 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
             "cost": int(slv.ObjectiveValue()),
         }
 
+    # ---------- 阶段1：先解「不含共格十字直通细则」的松弛模型 ----------
+    # 为什么：那层细则正是最难满足的部分（共格必须一横一纵直通、交叉格不能是端点、
+    # 不能转弯），硬模型上求解器连一个可行解都很难找到（实测 example：300s 零解）。
+    # 拿掉它以后模型好解得多，能很快给出：
+    #   * 一个骨架解（模块摆位 + 大致路径）——当阶段2 的 Hint，让 CP-SAT 去 repair；
+    #   * 一个**合法下界** lb_relax（松弛问题最优值 <= 原问题最优值）。
+    # 松弛解可能违反细则，所以：绝不能输出成 solN，也绝不能当目标上界。
+    relax_lb = None
+    relax_stat = None
+    relax_sol = None
+    relax_legal = False
+    relax_wall = 0.0
+    relax_hint_n = 0
+
+    if relax_phase and nets and hint_stat is None:
+        t1 = max(3.0, min(0.35 * time_limit, 120.0))
+        blog(f"阶段1（松弛：先不加共格细则）开始，预算 {t1:.1f}s")
+        s1 = cp_model.CpSolver()
+        s1.parameters.max_time_in_seconds = t1
+        s1.parameters.num_workers = workers
+        s1.parameters.log_search_progress = verbose
+        rec = RelaxRecorder(make_solution, violations=share_violations)
+        st1 = s1.Solve(model, rec)
+        relax_stat = s1.StatusName(st1)
+        relax_wall = s1.WallTime()
+        relax_lb = int(round(s1.BestObjectiveBound()))
+        if rec.best is not None:
+            relax_sol = rec.best
+            relax_legal = (rec.best_viol == 0)
+            if relax_legal:
+                blog(f"阶段1 拿到**合法解** cost={relax_sol['cost']}"
+                     f"（松弛模型上就满足了共格细则，可以直接当上界用）")
+            else:
+                first = rec.best_vac[0]
+                blog(f"阶段1 松弛解 cost={relax_sol['cost']}，"
+                     f"违反共格细则 {rec.best_viol} 处"
+                     f"（例如 格{first[0]} T={first[1]} H={first[2]} "
+                     f"V={first[3]} E={first[4]}；挑的是违规最少的骨架，"
+                     f"一共报过 {rec.count} 个解）——不能当结果，只作 Hint")
+        blog(f"阶段1 结束: status={relax_stat}, 用时 {relax_wall:.1f}s, "
+             f"松弛下界 lb_relax={relax_lb}（对完整模型同样成立）")
+
+        # 骨架当 Hint；只有「验证过合法」的解才允许当目标上界
+        if relax_sol is not None and all(relax_sol["paths"]):
+            picks1 = {}
+            for m in movable_mods:
+                v = relax_sol["state"].get(m.id)
+                i = None if v is None else exact_pick(m.id, v["pos"], v["orient"])
+                if i is None:
+                    picks1 = None
+                    break
+                picks1[m.id] = i
+            if picks1 is not None:
+                relax_hint_n = add_hints(picks1, relax_sol["paths"])
+                blog(f"阶段1 骨架已作为阶段2 的 Hint（{relax_hint_n} 个变量，"
+                     f"违规处交给 CP-SAT repair）")
+            if relax_legal:
+                model.Add(obj <= relax_sol["cost"])
+                notes.append(f"obj<={relax_sol['cost']}(阶段1合法解)")
+        if relax_legal:
+            # 阶段1 就拿到了合法解：它是本轮的真成果，但**先不写盘**——
+            # 写完阶段2 很可能再报一个同样的 cost，会多出一份一模一样的 solN。
+            # 统一由上层收尾时按 cost 去重补写（main 里的 writer.submit 兜底）。
+            print(f"[exact] 阶段1 已得到合法解 cost={relax_sol['cost']}，"
+                  f"阶段2 若没有更好的就采用它", flush=True)
+        if relax_lb > 0 and (lb is None or relax_lb > lb) \
+                and (ub is None or relax_lb <= ub):
+            model.Add(obj >= relax_lb)
+            notes.append(f"obj>={relax_lb}(阶段1松弛下界)")
+            blog(f"松弛下界 obj >= {relax_lb} 已加进阶段2"
+                 + (f"（比历史下界 {lb} 更紧）" if lb else ""))
+    elif relax_phase and nets:
+        blog("阶段1 跳过：本轮已经有历史解作 Hint，直接进阶段2")
+
+    # ---------- 阶段2：把共格细则补回来，在完整模型上求最优 ----------
+    n_share = add_share_constraints()
+    blog(f"共格十字直通细则 +{n_share} 格已补进模型（阶段2 用完整模型）")
+
+    t_left = max(1.0, time_limit - relax_wall)
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = t_left
+    solver.parameters.num_workers = workers
+    solver.parameters.log_search_progress = verbose
+
+    hint_note = ""
+    if notes:
+        hint_note = "，warm start：" + " + ".join(notes)
+    if hint_stat is not None:
+        hint_note += (f"；完整 Hint cost={hint_stat['cost']}, "
+                      f"模块 {hint_stat['modules']} 个, "
+                      f"路径 {hint_stat['nets']} 条/{hint_stat['cells']} 格, "
+                      f"共 hint {hint_stat['hints']} 个变量（来自历史解）")
+    elif relax_hint_n:
+        hint_note += (f"；完整 Hint 来自阶段1 骨架（{relax_hint_n} 个变量）"
+                      + (f"，含合法解上界 obj<={relax_sol['cost']}"
+                         if relax_legal else "，含违规处待 repair"))
+    print(
+        f"[exact] 阶段2 开始（完整模型）: {len(all_cells)} 个可用格点, "
+        f"建模总耗时 {time.perf_counter() - blog.t0:.1f}s{_mem_text()}, "
+        f"阶段1 用时 {relax_wall:.1f}s, 阶段2 预算 {t_left:.1f}s "
+        f"(time_limit={time_limit:.1f}s, workers={workers})"
+        + hint_note,
+        flush=True,
+    )
+
     saver = SolutionSaver(make_solution, on_solution=on_solution)
     status = solver.Solve(model, saver)
     status_name = solver.StatusName(status)
-    wall = solver.WallTime()
+    wall = relax_wall + solver.WallTime()
+
+    def finish(sol, n_solutions, proven_lb, tag=""):
+        """把一份解补全成结果 dict，并把这一轮证出的界落盘。"""
+        sol["status"] = status_name
+        sol["solve_sec"] = wall
+        sol["num_solutions"] = n_solutions
+        sol["fixed"] = {m.id: {"pos": m.fixed_pos, "orient": 0}
+                        for m in fixed_mods}
+        sol["modules"] = modules
+        sol["cfg"] = cfg
+        sol["lb"] = proven_lb
+        sol["lb_relax"] = relax_lb
+        sol["bound_file"] = save_prev_bound(prefix, cfg, proven_lb, sol["cost"],
+                                           status_name, wall, applied=notes,
+                                           lb_relax=relax_lb)
+        if tag:
+            print(f"[exact] {tag}", flush=True)
+        return sol
+
+    hard_lb = int(round(solver.BestObjectiveBound())) \
+        if status in (cp_model.UNKNOWN, cp_model.OPTIMAL, cp_model.FEASIBLE) else 0
+    # 松弛下界对完整模型同样成立，超时/没找到解时直接用它兜底
+    proven_lb = max(hard_lb, relax_lb or 0)
 
     if status == cp_model.UNKNOWN:
-        # 时间上限到了、还没找到可行解：解没有，但**已证明的下界**是真成果，
+        # 时间上限到了、阶段2 没找到可行解。解没有，但**已证明的下界**是真成果，
         # 必须存下来（硬题目通常就是这个结局，下一轮 --hint 能接着用）。
-        proven_lb = int(round(solver.BestObjectiveBound()))
+        if relax_legal and relax_sol is not None:
+            # 阶段1 已经给出**合法解**：它是本轮的真成果（上面已经写过一份 solN）
+            return finish(relax_sol, saver.count + 1, proven_lb,
+                          tag=f"阶段2 超时前没找到更好的解；本轮结果是阶段1 的"
+                              f"合法解 cost={relax_sol['cost']}，"
+                              f"下界 lb={proven_lb}"
+                              f"（其中松弛下界 {relax_lb}）")
         saved = save_prev_bound(prefix, cfg, proven_lb, None, status_name, wall,
-                                applied=notes)
+                                applied=notes, lb_relax=relax_lb)
         print(f"[exact] 时间上限内没找到可行解（status=UNKNOWN）；"
               f"已证明下界 lb={proven_lb}"
+              + (f"（含阶段1 松弛下界 {relax_lb}）" if relax_lb else "")
               + (f"，已存入 {bound_state_path(prefix)}" if saved else ""),
               flush=True)
         print("[exact] 上一次的结果保持不变", flush=True)
@@ -1065,20 +1291,14 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                   flush=True)
         print("[exact] 上一次的结果保持不变", flush=True)
         return None
+    if relax_legal and relax_sol is not None \
+            and relax_sol["cost"] < int(round(solver.ObjectiveValue())):
+        # 阶段2 找到的解反而更差（少见，但可能：阶段1 已经给过合法解）
+        return finish(relax_sol, saver.count + 1, proven_lb,
+                      tag=f"阶段1 的合法解 cost={relax_sol['cost']} 比阶段2 更好，"
+                          f"采用阶段1 的结果")
     best = make_solution(solver)
-    best["status"] = status_name
-    best["solve_sec"] = wall
-    best["num_solutions"] = saver.count
-    best["fixed"] = {m.id: {"pos": m.fixed_pos, "orient": 0} for m in fixed_mods}
-    best["modules"] = modules
-    best["cfg"] = cfg
-
-    # 把这一轮**证明出来**的下界落盘（下一轮 --hint 会把它当 obj>=L 用）。
-    proven_lb = int(round(solver.BestObjectiveBound()))
-    best["lb"] = proven_lb
-    best["bound_file"] = save_prev_bound(prefix, cfg, proven_lb, best["cost"],
-                                        status_name, wall, applied=notes)
-    return best
+    return finish(best, saver.count, proven_lb)
 
 
 def main():
@@ -1093,6 +1313,9 @@ def main():
                     help="warm start：用上次的最好解做完整 Hint，并同时施加"
                          "历史上下界（obj<=上次最好解、obj>=上次已证下界）"
                          "（默认关闭）")
+    ap.add_argument("--no-relax-phase", action="store_true",
+                    help="关掉两阶段求解的阶段1（不再先解松弛模型拿骨架/下界），"
+                         "直接在完整模型上搜——排查用，一般不需要")
     args = ap.parse_args()
     cfg = json.load(open(args.config, encoding="utf-8"))
 
@@ -1105,7 +1328,8 @@ def main():
 
     res = solve_exact(cfg, time_limit=args.time_limit, workers=args.workers,
                       verbose=args.verbose, on_solution=writer.submit,
-                      hint_file=base, use_hint=args.hint)
+                      hint_file=base, use_hint=args.hint,
+                      relax_phase=not args.no_relax_phase)
     if res is not None and res["cost"] not in writer.costs:
         # 兜底：回调没来得及输出最终最优解时补一份
         writer.submit(res)
@@ -1122,6 +1346,10 @@ def main():
         return
     print(f"\nstatus: {res['status']}, 用时 {res['solve_sec']:.2f}s, "
           f"最优传送带格数: {res['cost']}, 已证明下界: {res.get('lb')}")
+    if res.get("lb_relax") is not None:
+        print(f"[exact] 其中阶段1 松弛下界 lb_relax={res['lb_relax']}"
+              f"（松弛模型证出的，对完整模型同样成立；单独记在 bounds.json 的"
+              f" lb_relax 字段里）", flush=True)
     if res.get("lb") is not None and res["lb"] == res["cost"]:
         print("[exact] 上界=下界：已证明这就是全局最优（间隙 0）", flush=True)
     elif res.get("lb") is not None:

@@ -195,6 +195,14 @@ BUILD_STEPS = [
     "模型构建完成",
 ]
 
+# 两阶段求解的日志（阶段1 松弛拿骨架/下界，阶段2 补细则求最优）
+PHASE_STEPS = [
+    "阶段1（松弛",
+    "阶段1 结束",
+    "共格十字直通细则",
+    "阶段2 开始（完整模型）",
+]
+
 
 def run_case(rep, name, time_limit=30.0, expect_cost=None):
     path = os.path.join(ROOT, "configs", f"config.{name}.json")
@@ -212,6 +220,11 @@ def run_case(rep, name, time_limit=30.0, expect_cost=None):
     rep.check(f"{name}: 进度日志按建模顺序出现", order == sorted(order))
     rep.check(f"{name}: 日志带耗时", bool(re.search(r"\(\d+\.\d+s, \+\d+\.\d+s\)", log)))
     rep.check(f"{name}: 报出模型规模", bool(re.search(r"模型规模 变量 \d+ 个 / 约束 \d+ 条", log)))
+    missing2 = [s for s in PHASE_STEPS if s not in log]
+    rep.check(f"{name}: 两阶段日志齐全（阶段1 松弛 / 阶段2 完整）", not missing2,
+              f"缺 {missing2}")
+    order2 = [log.find(s) for s in PHASE_STEPS]
+    rep.check(f"{name}: 两阶段日志顺序正确", order2 == sorted(order2))
 
     rep.check(f"{name}: 找到解", res is not None, f"用时 {wall:.1f}s")
     if res is None:
