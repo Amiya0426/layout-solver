@@ -1,5 +1,8 @@
 # 通用“模块布点 + 传送带布线”求解器
 
+通用「模块布点 + 传送带布线」求解器：把每个可动模块放在哪、转多少度、每条传送带怎么走，一次性算出来。
+两种后端——启发式（模拟退火 + A*，零依赖）和精确最优（CP-SAT，可证最优）；外加一个只用标准库的图形界面。
+
 ## 目录结构
 
 ```text
@@ -19,8 +22,13 @@
 ├── configs/     题目配置 config.<题目名>.json
 ├── result/      求解产物（每个新解一份 solN.svg / solN.txt + solutions.jsonl）
 ├── tests/       冒烟测试、预设测试、前端逻辑测试、端到端探针
-├── docs/        布局参考图、原始布局文本、分析报告、归档代码
+├── docs/        深度文档 + 布局参考图、原始布局文本、归档代码
+│   ├── exact-model.md        精确求解器：按格聚合、合法下界、两阶段、presolve
+│   ├── warm-start.md         warm start：完整 Hint、上下界复用、bounds.json
+│   ├── cp-sat-log.md         怎么读 CP-SAT 的 --verbose 日志
+│   └── heuristic.md          启发式的打分与搜索
 ├── requirements.txt
+├── SKILL.md     维护/排障手册（环境、命令速查、不变量、性能基线、决策树）
 └── README.md
 ```
 
@@ -64,13 +72,16 @@ python src/webui_server.py --port 8765     # 打开 http://127.0.0.1:8765/
 # 4) 自检（不需要 OR-Tools，约 10 秒）
 python tests/test_smoke.py
 
-# 5) 模块预设（读 data/设备尺寸.xlsx，并用预设拼出的配置真跑一遍启发式求解）
+# 5) 精确求解器自检（需要 OR-Tools；独立校验解的语义 + 建模/两阶段日志）
+python tests/test_exact_model.py
+
+# 6) 模块预设（读 data/设备尺寸.xlsx，并用预设拼出的配置真跑一遍启发式求解）
 python tests/test_presets.py
 
-# 6) 前端逻辑（需要 node；没装就跳过）
+# 7) 前端逻辑（需要 node；没装就跳过）
 python tests/test_webui_frontend.py
 
-# 7) 端到端前端探针（需要能用的无头 Chrome/Edge，否则自动跳过）
+# 8) 端到端前端探针（需要能用的无头 Chrome/Edge，否则自动跳过）
 python tests/webui_presets_probe.py
 ```
 
@@ -78,9 +89,11 @@ Windows 下如果中文乱码，可先设置 `$env:PYTHONIOENCODING="utf-8"`。
 
 > 提示：`configs/config.example.json` 状态空间很大，跑几分钟也未必到
 > `OPTIMAL`，不适合快速试跑；小规模验证请用 `config.toy.json` /
-> `config.cross.json`。
+> `config.cross.json`（已知最优分别是 **7** 和 **12**）。
 
-各类求解器的详细用法见下文「启发式求解」「精确最优求解（CP-SAT）」。
+各类求解器的详细用法见下文「启发式求解」「精确最优求解（CP-SAT）」；
+其余回归脚本（`warmstart_probe.py` / `stop_bound_probe.py`）与改动检查清单
+见 [`SKILL.md`](SKILL.md)。
 
 ## 模块一览
 
@@ -94,8 +107,23 @@ Windows 下如果中文乱码，可先设置 `$env:PYTHONIOENCODING="utf-8"`。
 - `configs/config.toy.json`：可运行的小示例
 - `configs/config.cross.json`：强制垂直交叉的最小示例
 - `tests/test_presets.py` / `tests/test_webui_frontend.py`：预设与前端逻辑测试
+- `SKILL.md`：维护/排障手册（环境、命令速查、必须守住的不变量、性能基线、决策树）
+- `docs/exact-model.md` / `docs/warm-start.md` / `docs/cp-sat-log.md` /
+  `docs/heuristic.md`：深度文档，见下面的「文档地图」
 - `docs/archive_layout_exact_optimized.py`：早期实验性增强版求解器，
   **未被任何入口调用**，仅作归档，不再维护
+
+## 文档地图
+
+| 文件 | 写给谁 / 放什么 |
+| --- | --- |
+| `README.md`（本文） | 使用者：怎么装、怎么跑、配置怎么写、输出在哪 |
+| `SKILL.md` | 维护者/助手：环境、命令速查、必须守住的不变量、性能基线、排障决策树 |
+| `docs/exact-model.md` | 精确求解器原理：按格聚合、合法下界、两阶段、presolve 策略 |
+| `docs/warm-start.md` | warm start 机制、上下界复用、`bounds.json` 字段语义 |
+| `docs/cp-sat-log.md` | 怎么读 CP-SAT 的 `--verbose` 日志 |
+| `docs/heuristic.md` | 启发式的打分函数、拆线重布、为什么大题目难 |
+| `docs/webui_frontend_report.md` | WebUI 前端实现报告（历史文档） |
 
 ## WebUI（图形化编辑 + 一键求解）
 
@@ -256,31 +284,7 @@ $env:PYTHONIOENCODING="utf-8"
 python src/layout_solver.py configs/config.toy.json
 ```
 
-### 搜索是怎么打分的（为什么大题目很难）
-
-模拟退火每一轮都要“摆位 + 布线”评估一次，几个关键点：
-
-- **摆位**：随机摆 N 版（默认 8 版）取 `placement_score()` 最低的那版。这个分数
-  只统计两类“没救”的征兆——端口外侧格不够它挂的 net 数、以及某条 net 的起点和
-  终点不在同一块自由空间里。注意它是**软打分**而不是硬条件：实测
-  `config.example.json` 随手摆一万版都过不了硬条件（自由空间被模块切碎），
-  一味重试只会把时间烧光。
-- **布线**：顺序贪心 + 4 次随机顺序，每次只允许“一横一纵十字直通”的合法交叉；
-  还有布不通的就沿**理想路径**（无视其它带的最短路）拆线重布，一轮不行就扩大
-  事故现场再来，最多 4 轮。
-- **代价**：`1000 × 没布通的 net 数 + 已布格的格数`。以前只要有一条布不通就
-  整体算失败（1e9），代价面是全有全无的、SA 没有梯度；现在“少布通一条就少 1000”，
-  搜索能顺着这个梯度爬。
-- **日志**：每 2~5 秒报一次进度，包括**最接近时还差几条 net 没布通**：
-
-```text
-[heuristic]   14.1s 仍在搜索… 当前最优传送带格数 -, 最接近时还差 2 条 net, 本轮回火次数 1134
-[heuristic] 搜索结束，未找到可行布局 (耗时 120.0s)；最接近的一次还差 1 条 net 没布通
-```
-
-`config.example.json`（9 条 net）现在能爬到“只差 1 条”，但还布不通最后一条；
-真要在这种题目上拿到合法解，用精确求解器的两阶段（见下文），它会把阶段1 的骨架
-直接交给 CP-SAT 去 repair。
+打分方式、为什么大题目难、以及「最接近时还差几条 net」这类日志怎么看，见 [`docs/heuristic.md`](docs/heuristic.md)。
 
 ## 精确最优求解（CP-SAT）
 
@@ -312,314 +316,20 @@ python src/layout_exact.py configs/config.toy.json --time-limit 60
 搜索结果**不设数量上限**：找到多少个可行解就立刻写多少份
 （`solN.txt` / `solN.svg` / `.solutions.jsonl`），编号 `0..N-1` 连续。
 
-### 建模阶段的进度日志
+一句话现状：精确求解器默认**两阶段**跑（阶段1 先解不含「共格十字直通」细则的
+松弛模型拿骨架和合法下界，阶段2 补回细则求最优），并在建模时补一条合法下界
+`obj >= 连接条数`。大题目（`config.gudi.json`，27×30 / 33 可动模块 / 47 连接）
+建模约 **29s、约 1GB**，之后 presolve 会自动让位给搜索。
 
-大题目（`config.gudi.json`：27x30 画布 / 33 个可动模块 / 47 条连接）光是**建模**
-就要几十秒，而这段时间以前一行日志都没有，看起来和卡死没有区别。现在建模被拆成
-有名字的若干步，每行都带 `(累计, +本步)` 两个耗时：
+想深入了解时看这几份：
 
-```text
-[exact] 读取配置: 27x30 画布, 固定模块 10 个, 可动模块 33 个, 连接 47 条
-[exact] 候选位置: 精炼炉1=2688, …, 协议储存箱1=2688 (1.8s, +1.8s)
-[exact] place 变量 83890 个（每个可动模块恰好选中一个候选位姿） (2.6s, +0.7s)
-[exact] 可用格点 780 个（固定模块占掉的 30 格永久禁带） (2.6s, +0.0s)
-[exact] 占用聚合变量 780 个（同格模块互斥已并入其中） (5.3s, +2.8s)
-[exact] 端点格变量 65530 个（原逐 (候选, 外侧格) 写法要 836490 个） (9.4s, +4.1s)
-[exact] 弧变量 141376 个, use 变量 36660 个 (11.2s, +1.8s)
-[exact] 直通变量 136112 个 (17.1s, +5.9s)
-[exact] 流量平衡约束 36660 组 (17.1s, +0.0s)
-[exact] 同格共带/交叉约束（按格聚合，替代逐对 share 变量） (22.4s, +5.3s)
-[exact] 模块禁带约束 36660 条 (23.8s, +1.4s)
-[exact] 目标函数：最小化传送带占用格总数 (25.9s, +2.1s)
-[exact] 模型规模 变量 465129 个 / 约束 1083452 条 (26.1s, +0.2s)
-[exact] 模型构建完成: 780 个可用格点, 变量 465129 个 / 约束 1083452 条, 建模总耗时 26.1s，进程内存 1.01GB；开始 CP-SAT 搜索 (time_limit=120.0s, workers=8)
-[exact] 提示：CP-SAT 会先做一轮 presolve，模型大时这一步可能几十秒没有任何输出，之后才会开始报可行解
-```
-
-`+本步` 让你一眼看出慢在哪一步、有没有在推进；`模型规模` 与`进程内存`是判断
-“还能不能再加时间 / 要不要换机器”的依据。最后两行也说明白了：建模结束之后
-还有一段**没有解输出的 presolve 期**，那段时间安静是正常的。
-
-### 建模规模：为什么原来会在大题目上卡死
-
-同一份题目（27x30 / 33 可动模块 / 47 net）改成“按格聚合”前的规模：
-
-| 部分 | 旧写法 | 现写法 |
-| --- | ---: | ---: |
-| place（模块候选位姿） | 83,890 | 83,890 |
-| 端点变量（哪一格是带的起点/终点） | 836,490 | 65,530 |
-| use（每 net x 每格是否被占） | 36,660 | 36,660 |
-| arc（每 net x 每格 x 每方向） | 141,376 | 141,376 |
-| 直通变量 hE/hW/vN/vS | 136,112 | 136,112 |
-| share（每格每一对 net 共格） | 843,180 | 0（换成每格一个整数 `T`） |
-| 占用聚合 `occ` | — | 780 |
-| **变量合计** | **2,077,708** | **465,129** |
-| 禁带约束（模块候选格 x net） | 55,466,016 | 36,660 |
-| 共格约束（每对 x 8 条） | 6,745,440 | ~40,000 |
-| **约束合计** | **≈6,290 万** | **1,083,452** |
-
-三处等价改写（都只改“怎么写”，不改“约束的是什么”）：
-
-1. **禁带 + 非重叠**：`occ[cell] = 覆盖该格的所有候选 place 之和`（限成 0/1），
-   于是“同格最多一个模块”和“模块占的格不能走带”（每格 `occ + use <= 1`）都由
-   这一条等式推出来，不必再写 `模块候选 x 格 x net` 那一层。
-2. **共格/交叉**：记 `T` = 该格被几条带占用（`<=2`），`H`/`V` = 该格横向/纵向直通
-   的条数，`E` = 该格的端点数。`T=2` 时用 `use_i + T <= 2 + 直通_i`、`H+V >= 2T-2`
-   配合 `H<=1, V<=1`、`E + 2T <= 4` 就能表达“两条带共格必须一横一纵直通、交叉格
-   不能是端点”，和原来逐对 `(a,b)` 写 8 条 `OnlyEnforceIf` 在整数解上完全等价。
-3. **端点**：不再给每个 `(候选, 外侧格)` 建变量，而是按**格**建
-   `end[cell] <= Σ(能落到该格的候选 place)` 且 `Σ end = 1`；模块候选恰好选一个，
-   于是“选中的候选必须能覆盖那个端点格”与原来的精确命中等价，顺带剪掉了
-   “端口接不出去”的候选。
-
-结果：`config.gudi.json` 从“建模阶段就吃光内存/时间”变成 **约 26 秒建完、
-约 1GB 内存**（8 线程、`--verbose`），日志里每一步都看得见。
-
-### 合法冗余下界：`obj >= 连接条数`
-
-下界不是只能靠求解器慢慢爬。有两条是原始语义的**直接推论**，写进模型既不会切掉
-任何可行解，又能让求解器一开始就拿到一个像样的界：
-
-1. 每条 net 恰好一个起点格，而 `use >= 起点变量`，所以它至少占 1 格
-   ⇒ `obj >= 连接条数`；
-2. 路径四邻接连通，从起点格走到终点格至少要「曼哈顿距离」步
-   ⇒ 单条 net 的占用格数 `>= 曼哈顿距离 + 1`（起点/终点各自只在候选可能落到的
-   那组格里选，取这组格之间的最小距离即可，模块挡路只会更长）。
-
-实测（`config.example.json`，9 条 net）：
-
-```text
-[exact] 合法下界 obj >= 9（每条 net 至少 1 格 = 9，端点曼哈顿距离再加 0）
-#Bound   8.22s best:inf   next:[9,714]    initial_domain     ← 一开始就是 9
-```
-
-不加这条时，同一个模型要靠 `bool_core` 一步步爬，**224s 才到 9**。
-`config.cross.json` 更直观：两条 net 的端点相距很远，曼哈顿部分直接贡献 10，
-于是 `obj >= 12` —— 恰好就是它的最优值（日志里 `合法下界 obj >= 12`）。
-
-### 两阶段求解：先解松弛模型拿骨架，再补细则求最优
-
-精确模型里最难满足的不是“不重叠”“不走模块”，而是**共格细则**：两条带同格
-必须是「一横一纵的十字直通」，交叉格不能是端点、也不能转弯。硬模型上求解器
-连第一个可行解都很难找到（实测 `config.example.json`：300s 零解）。
-
-所以默认走两阶段（同一份模型，先不加那层细则，阶段2 再补回来）：
-
-```text
-[exact] 同格共带/交叉约束：两阶段求解——阶段1 先不加（松弛），阶段2 再补
-[exact] 阶段1（松弛：先不加共格细则）开始，预算 105.0s
-[exact] 阶段1 松弛解 cost=53，违反共格细则 16 处（挑的是违规最少的骨架，一共报过 29 个解）——不能当结果，只作 Hint
-[exact] 阶段1 结束: status=FEASIBLE, 用时 105.3s, 松弛下界 lb_relax=9（对完整模型同样成立）
-[exact] 阶段1 骨架已作为阶段2 的 Hint（12650 个变量，违规处交给 CP-SAT repair）
-[exact] 共格十字直通细则 +122 格已补进模型（阶段2 用完整模型）
-[exact] 阶段2 开始（完整模型）: … 阶段2 预算 194.7s
-[exact] 发现可行解 #1: 传送带格数 53, 用时 39.21s -> 已输出 sol0.svg / sol0.txt
-…
-status: FEASIBLE, 用时 300.53s, 最优传送带格数: 28, 已证明下界: 9
-```
-
-几条关键约定（都写在代码注释里了）：
-
-- 阶段1 的解**可能不合法**（它只满足松弛后的约束），所以既不能输出成 `solN`，
-  也**不能当目标上界**（它的 cost 可能低于真正的最优值）。它只有两个用途：
-  当阶段2 的 Hint 让 CP-SAT 去 repair，以及提供**合法下界** `lb_relax`。
-- 挑哪个松弛解给阶段2？按**违规格数优先、再按 cost**：最便宜的解往往在多格
-  叠了带（违规多），拿去 repair 更难；违规最少的骨架才是好 Hint。
-- 阶段1 找到**0 违规**的解就是**合法解**，此时才允许当上界（`obj<=C`），
-  阶段2 若没找到更好的就直接采用它。
-- `lb_relax` 单独存进 `bounds.json` 的 `lb_relax` 字段（来源和 `lb` 不同，方便
-  排查），下一轮 `--hint` 会取两者更紧的那个用。超时且阶段2 没找到解时，下界
-  直接用 `lb_relax` 兜底。
-- 已经带历史解 Hint 的一轮会**跳过阶段1**（`阶段1 跳过：本轮已经有历史解作 Hint`）；
-  `--no-relax-phase` 可以整体关掉两阶段，用于排查。
-
-### Warm start（可选）：接着上一轮跑
-
-WebUI「求解」页有 **Warm start** 勾选框，默认不勾；命令行对应 `--hint`。
-
-同一个题目往往会反复求解。勾上之后，`layout_exact.py` 会读该题目上次留下的
-`result/<题目>/<题目>.solutions.jsonl` 与 `result/<题目>/<题目>.bounds.json`，
-一次做三件事：
-
-| 做什么 | 依据 | 做错了会怎样 |
-| --- | --- | --- |
-| **完整 Hint**：把上次的解翻译成**每个变量**的取值（模块位姿、每格占用、端点格、`use`、`arc`、直通方向） | 一个已知可行解 | 只是搜索起点，没被采纳也无妨 |
-| **压上界**：`obj <= min(solutions.jsonl 最好解, bounds.json 的 best)` | 一份现成可行解 | `INFEASIBLE`/`UNKNOWN`，会报错、会“吵” |
-| **抬下界**：`obj >= 上次已证明的下界` | 上一轮**证明**出来的结论 | 会**静默**剪掉最优解，最危险 |
-
-三样里只有**下界**需要额外保护：它是对“上一轮那份模型”成立的定理，配置或建模
-代码一变就不再适用。所以下界单独存 `result/<题目>/<题目>.bounds.json`，里面带
-**config 内容指纹 + 建模代码指纹**，任何一项对不上就自动忽略（日志会写
-`忽略历史下界：配置已改动（指纹不一致）`）。删掉这个文件即可彻底从零开始。
-
-Hint 为什么必须是**完整**的：CP-SAT 只在“每个非固定变量都有提示”时才会在
-presolve 阶段直接把它当成 incumbent，搜索都不用开始：
-
-```text
-[exact] 模型构建完成: 63 个可用格点, 变量 2645 个 / 约束 6663 条, 建模总耗时 0.3s，进程内存 0.10GB；开始 CP-SAT 搜索 (time_limit=15.0s, workers=4)，warm start：obj<=7 + obj>=7 + 上下界重合=上一轮已证该值最优；完整 Hint cost=7, 模块 3 个, 路径 4 条/7 格, 共 hint 2644 个变量
-The solution hint is complete and is feasible. Its objective value is 7.
-#Bound   2.72s best:inf   next:[7,7]      initial_domain
-#1       2.72s best:7     next:[]         complete_hint
-```
-
-日志里那个 `共 hint N 个变量` 就是覆盖率，`2644/2644` 即完整。旧实现只提示
-模块位姿、端点和路径格，CP-SAT 只能另起一个 `hint search` 子求解器去补全：
-
-```text
-The solution hint is incomplete: 18 out of 4424 non fixed variables hinted.
-```
-
-补全要重新决定“每条带怎么连通”，这部分信息就白丢了。现在 `arc` / `hcomp` /
-`vcomp` / 每格占用 `occ` / `use=0` / `pvar=0` / 未命中的端点格全部都会提示。
-万一历史解已经不适配当前模型，完整 Hint 也不会让整轮报废：CP-SAT 会打印
-`The solution hint is complete, but it is infeasible! we will try to repair it.`
-并尝试修补；实在修不出来就退回普通搜索。
-
-实测（`config.toy.json`，3 个可旋转模块，4 线程，15s 预算）：
-
-| 运行 | 施加的约束 | 拿到最优解 cost=7 | 证明最优 |
-| --- | --- | --- | --- |
-| 冷启动（无历史） | 无 | 4.72s（此前还报了 13、11 两个劣解） | 10.97s |
-| warm start | 完整 Hint + `obj<=7` + `obj>=7` | **2.72s（presolve 阶段，只 1 个解）** | **2.72s（立刻得证）** |
-| warm start，但删掉 bounds.json | 完整 Hint + `obj<=7` | 2.74s | 9.28s 时还在爬下界 |
-
-第二、三行说明了上下界各自的作用：上界+Hint 负责“很快拿到好解”，下界负责
-“不用重新证一遍已经证过的部分”。
-
-### 先搞清「上下界」：`next:[lb, ub]` 是什么
-
-跑 `--verbose` 会看到 CP-SAT 的搜索进度。`#Bound` 行打印的就是
-**当前目标函数的上下界**（源码里的表头是 `Objective bounds`），格式为
-`next:[lb,ub]`，含义是"**接下来要在 `[lb,ub]` 这个区间里找解**"：
-
-```text
-#Bound   2.70s best:inf   next:[0,252]    initial_domain   ← 一开始 lb=0
-#3       4.28s best:8     next:[0,7]                      ← 找到 cost=8
-#Bound   4.44s best:8     next:[1,7]      bool_core (num_cores=1 …)  ← lb 升到 1
-#4       4.52s best:7     next:[1,6]                      ← 找到 cost=7
-#Bound   4.80s best:7     next:[4,6]      bool_core (num_cores=4 …)  ← lb 升到 4
-#Done    9.82s
-```
-
-- **`lb`（`next` 左值）**：**已证明**解的格数不可能低于它，随搜索逐步上升
-  （上面 0 → 1 → 4）。它由约束传播 / LP 松弛 / core 推理**算出来**，任何 API
-  都设不了（详见下一节）。
-- **`ub`（`next` 右值）**：本次要找的解的格数**上限**——因为已找到的解
-  再重复找到没有意义，所以只要严格更优的，即 `< best`。
-- **`best`**：当前**已找到**的最好解的格数，是另一个独立的量。
-  `best:19` 配 `next:[14,18]` 完全可能，含义是：
-  **已证明 0–13 不可能，当前最好解是 19，接下来在 14–18 里找**。
-- 当 `lb` 追上 `best`（如 `best:7` 且 `lb` 也到 7），**最优性得证**，直接 `#Done`。
-- 右边那列是**这个界是谁给的**，随版本变化：老版本是 `default_lp` / `max_lp`，
-  新版本（9.13+）常见 `bool_core`。`bool_core (num_cores=…)` 里的
-  **`num_cores` 不是 CPU 核数**，而是 core 推理攒下的 core 个数——布尔目标下
-  它往往和 `lb` 同步增长（日志里 `num_cores=10` 配 `next:[10,18]`），
-  `( … )` 里是它的内部统计，`fixed=` / `clauses=` 是底层 SAT 的计数器。
-
-下界**不能凭空设定**：`model.Add(obj >= L)` 这一行谁都能写，但 L 是否成立取决于
-**有没有证明**。上界之所以能随手写，是因为 `obj <= C` 背后有一份现成的可行解
-作见证；下界没有见证，只有上一轮跑出来的结论。所以 `--hint` 里的下界只认
-`bounds.json` 里那份**带指纹校验的、上一轮真正证明出来的**界；跨配置抄一个数字
-（或把日志里 `next:[L, …]` 的 L 搬过来）会让最优解被静默剪掉，而 CP-SAT 依然
-返回 `OPTIMAL`——这是本项目里唯一“错了不会吵”的改动，因此不做成可手填的参数。
-
-| 我们加什么 | 依据 | 效果 |
-| --- | --- | --- |
-| `obj <= C`（`--hint`） | 一份现成可行解 | 不比上次差 |
-| `obj >= L`（`--hint`，L 来自 bounds.json） | 上一轮已证明的下界 | `0..L-1` 不必重新证 |
-| 手填一个下界 | **无** | 写错 = 静默的错误答案，不要这么干 |
-
-### 下界持久化：`<题目>.bounds.json`
-
-一轮求解正常收工（`OPTIMAL` / `FEASIBLE` / `UNKNOWN`）之后，本轮**证明出来**的
-目标下界会写进 `result/<题目>/<题目>.bounds.json`：
-
-```json
-{
-  "lb": 14,
-  "best": 19,
-  "status": "UNKNOWN",
-  "solve_sec": 835.58,
-  "config_sha256": "d75771d7…",
-  "code_sha256": "dff286b4…",
-  "ortools": "9.15.6755",
-  "applied": ["obj<=19"],
-  "when": "2026-09-10 22:10:58"
-}
-```
-
-下一轮带 `--hint` 时会加 `obj >= 14`，于是日志里第一个 `#Bound` 就直接是
-`next:[14, …]`，省掉“重新把界从初始值抬到 14”这段（本例里是 835s）。注意
-**省不掉 14→19 那段**：core 推理学到的结构不会随数字一起搬过来。
-
-几条约定：
-
-- **只增不减**：新界比旧界小时保留旧界（旧界同样有效，不必退回去）；
-- `INFEASIBLE` 的那一轮**不写**文件（把目标挤没了的模型，其“下界”没有意义）；
-- **手动停止也写**：WebUI 的「停止」是直接终止求解进程，子进程来不及收尾，
-  这时由**服务端**从它已经打印出来的日志里取最后那个
-  `next:[lb, …]`，补写 bounds.json（日志里会看到
-  `[server] 已把日志中证明的下界 lb=14 存入 example.bounds.json`）；
-- 终端里 Ctrl-C 直接杀进程，**不保证**能留下下界（CP-SAT 求解中途不把控制权
-  交回 Python），要保存成果请用 WebUI 的「停止」按钮；
-- 指纹不一致（配置改了 / `layout_exact.py` 改了，哪怕只改注释）自动忽略，
-  日志会说明原因；也就是说改完代码后的第一轮会退化成冷启动，这是有意为之；
-- 想看“完全不复用历史”的表现：删掉 `.bounds.json`，或干脆不加 `--hint`；
-- `applied` 记录的是**证明这个界时模型上还加了什么约束**，仅供排查用；
-- 里面的 `best` 也会被当**上界**复用：即使 `solutions.jsonl` 被后来更差的一轮
-  覆盖（“一次求解 = 一份结果”的副作用），之前那个好上界也不会丢，日志会提示
-  `上界 N 比 solutions.jsonl 里的最好解 cost=M 更紧`。
-
-### 收益与边界
-
-- warm start 让“再次求解”从一个现成 incumbent 出发，并把窗口收到 `[L, C]`
-  （L = 历史已证下界，C = 历史最好解）。小题目（`config.toy.json`）CP-SAT 本身
-  几秒就搜到最优，加不加差别不大；大题目里“找到第一个可行解”本身就很慢，这时
-  收益最明显——实测 `config.toy.json` 是 10.97s → 2.72s。
-- 但它**加速不了“证明最优”**：如果 `best` 长时间不动、只有 `lb` 在爬（说明卡在
-  下界证明），Hint 帮不上忙。能动的只有 (a) 更多时间；(b) 复用历史下界，
-  把上一轮证到的 L 带过来；(c) 模型本身，例如给每条 net 加“路径格数 ≥ 源/宿格
-  曼哈顿距离 + 1”这类**合法**的加强下界条件约束。
-- 如果历史解陈旧（cost 比当前模型的真实最优还小），`obj <= C` 会偏紧，模型直接
-  `INFEASIBLE`；程序会提示“历史数据与当前配置不一致”，删掉历史文件或去掉
-  `--hint` 重跑即可。
-
-另外提醒：`config.example.json`（17 列 9 条 net）的状态空间很大，
-即使跑几分钟也只到 `FEASIBLE`，不适合拿来快速试跑；
-小规模验证请用 `config.toy.json` / `config.cross.json`。
-
-精确版搜索过程中得到的**每一个可行解**都会当场保存下来，不用等搜索结束。
-数量**不设上限**，按发现顺序记录，编号 `0..N-1` 连续；同一个传送带格数
-只报一次（重复的解没有意义）。
-
-```bash
-python src/layout_exact.py configs/config.example.json --time-limit 600 --workers 16
-```
-
-边搜索边生成（每找到一个解就刷新一次）：
-
-- `result/example/example.solN.txt` / `.solN.svg`：第 N 个可行解的字符画与彩色 SVG；
-- `result/example/example.solutions.jsonl`：按搜索顺序追加所有可行解；
-- `result/example/example.svg`：搜索结束后再画一遍最优解；
-- 终端字符画：`[A/S1]` / `[B/E1]` 显示模块端口，路径格只保留
-  `→ ← ↑ ↓` 方向箭头，`╋` 表示交叉。
-
-启发式版 `layout_solver.py` 现在也是同样的输出方式：它会一直搜索到
-`--timeout` 用完，每找到更好的布局就立刻输出一份，可以中途暂停/停止。
-
-默认输出目录规则：`result/<题目文件名>/<题目文件名>.*`，例如：
-
-- `config.cross.json` -> `result/cross/cross.solutions.jsonl`、`result/cross/cross.svg`
-- `config.toy.json`   -> `result/toy/toy.solutions.jsonl`、`result/toy/toy.svg`
-- `config.example.json` -> `result/example/example.solutions.jsonl`、`result/example/example.svg`
-
-可自定义输出前缀：
-
-```bash
-python src/layout_exact.py configs/config.example.json --time-limit 600 --output my_dir/my_problem
-```
-
-会生成 `my_dir/my_problem.solutions.jsonl` 和 `my_dir/my_problem.svg`。
+| 想知道 | 看 |
+| --- | --- |
+| 模型是怎么建的、为什么这么建（按格聚合、合法下界、两阶段、presolve 策略） | [`docs/exact-model.md`](docs/exact-model.md) |
+| `--hint` 的完整 Hint / 上下界 / `<题目>.bounds.json` 字段与复用规则 | [`docs/warm-start.md`](docs/warm-start.md) |
+| `--verbose` 日志里的 `next:[lb, ub]`、`bool_core`、presolve 静默期怎么读 | [`docs/cp-sat-log.md`](docs/cp-sat-log.md) |
+| 启发式怎么打分、为什么大题目难 | [`docs/heuristic.md`](docs/heuristic.md) |
+| 想在这个仓库里改代码 / 排障（环境、不变量、性能基线、决策树） | [`SKILL.md`](SKILL.md) |
 
 ## 从 solutions.jsonl 批量生成可视化
 
@@ -785,12 +495,47 @@ Y 底部一行全部是出口，就声明 6 个底部格，`dir: "S"`。
    - 垂直交叉点显示为 `╋`；
    - 所有列按终端实际显示宽度对齐，格式与 SVG 的箭头/交叉表达保持一致。
 
+精确版搜索过程中得到的**每一个可行解**都会当场保存下来，不用等搜索结束。
+数量**不设上限**，按发现顺序记录，编号 `0..N-1` 连续；同一个传送带格数
+只报一次（重复的解没有意义）。
+
+```bash
+python src/layout_exact.py configs/config.example.json --time-limit 600 --workers 16
+```
+
+边搜索边生成（每找到一个解就刷新一次）：
+
+- `result/example/example.solN.txt` / `.solN.svg`：第 N 个可行解的字符画与彩色 SVG；
+- `result/example/example.solutions.jsonl`：按搜索顺序追加所有可行解；
+- `result/example/example.svg`：搜索结束后再画一遍最优解；
+- 终端字符画：`[A/S1]` / `[B/E1]` 显示模块端口，路径格只保留
+  `→ ← ↑ ↓` 方向箭头，`╋` 表示交叉。
+
+启发式版 `layout_solver.py` 现在也是同样的输出方式：它会一直搜索到
+`--timeout` 用完，每找到更好的布局就立刻输出一份，可以中途暂停/停止。
+
+默认输出目录规则：`result/<题目文件名>/<题目文件名>.*`，例如：
+
+- `config.cross.json` -> `result/cross/cross.solutions.jsonl`、`result/cross/cross.svg`
+- `config.toy.json`   -> `result/toy/toy.solutions.jsonl`、`result/toy/toy.svg`
+- `config.example.json` -> `result/example/example.solutions.jsonl`、`result/example/example.svg`
+
+可自定义输出前缀：
+
+```bash
+python src/layout_exact.py configs/config.example.json --time-limit 600 --output my_dir/my_problem
+```
+
+会生成 `my_dir/my_problem.solutions.jsonl` 和 `my_dir/my_problem.svg`。
+
 ## 约束与假设
 
 - 传送带不能穿过任何模块或固定设施。
-- 两条不同传送带不能共用同一个网格格。
+- 一格最多走两条带；两条带共格时必须是「一横一纵」的十字直通——不能转弯，
+  交叉格也不能是任何一条带的端点（模型里的「共格细则」，见
+  [`docs/exact-model.md`](docs/exact-model.md)）。
 - 模块之间至少要有一个空格，传送带才有地方放；如果两个相连模块被算法摆到紧贴位置，该 net 会判为不可行，从而被淘汰。
-- 目标默认是最小化总传送带格数；可自行在 `Solver.route` 中加入拐弯、交叉等惩罚项。
+- 目标默认是最小化总传送带格数；启发式版可自行在 `Solver.route` 中加入拐弯、交叉等惩罚项。
 
 ## 换成你自己的题目
 
