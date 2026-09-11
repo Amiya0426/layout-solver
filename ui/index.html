@@ -39,19 +39,39 @@
     <div class="panel">
       <h3>模块</h3>
       <div id="moduleList" class="list"></div>
-      <div class="addbox">
-        <input id="newModId" placeholder="ID 如 J1">
-        <select id="newModKind">
-          <option value="movable">可动</option>
-          <option value="fixed">固定</option>
-        </select>
-        <input id="newModW" type="number" value="3" title="宽">
-        <input id="newModH" type="number" value="3" title="高">
-        <input id="newModR" type="number" value="0" title="固定行">
-        <input id="newModC" type="number" value="0" title="固定列">
-        <label class="inline"><input type="checkbox" id="newModRot" checked>可旋转</label>
-        <button id="btnAddModule">添加</button>
+
+      <div class="preset-box">
+        <div class="addbox">
+          <span class="muted">预设设备</span>
+          <input id="presetFilter" placeholder="筛选，如 精炼/液体" size="12">
+          <select id="presetSelect"></select>
+          <select id="newModKind">
+            <option value="movable">可动</option>
+            <option value="fixed">固定</option>
+          </select>
+          <label class="inline"><input type="checkbox" id="newModRot" checked>可旋转</label>
+          <span id="posFields" class="inline hidden">
+            行 <input id="newModR" type="number" value="0" style="width:56px">
+            列 <input id="newModC" type="number" value="0" style="width:56px">
+          </span>
+          <button id="btnAddPreset" class="primary">按预设添加</button>
+          <span id="presetSource" class="muted"></span>
+        </div>
+        <div id="presetPreview" class="preset-preview">
+          <span class="muted">选一个预设，这里会画出它的尺寸与各面端口；添加时同名模块从 1 开始编号。</span>
+        </div>
       </div>
+
+      <details id="manualAdd">
+        <summary>手动添加（不用预设；类型 / 可旋转沿用上面的设置）</summary>
+        <div class="addbox">
+          <input id="newModId" placeholder="ID 如 J1">
+          <input id="newModW" type="number" value="3" title="宽">
+          <input id="newModH" type="number" value="3" title="高">
+          <button id="btnAddModule">添加</button>
+          <span class="muted">默认左进右出，端口位置可以再手点修改</span>
+        </div>
+      </details>
     </div>
 
     <div class="panel">
@@ -62,6 +82,7 @@
 
   <div class="panel">
     <h3>连接表</h3>
+    <div class="muted">每条连接都是「出口（OUT）→ 入口（IN）」；改动会立刻反映到下面的连接预览。</div>
     <div id="netList"></div>
     <button id="btnAddNet">+ 添加连接</button>
   </div>
@@ -70,6 +91,14 @@
     <h3>固定模块预览</h3>
     <div id="preview" class="grid-preview"></div>
     <div class="muted">可动模块由求解器决定位置；灰色为可动，彩色为固定。</div>
+  </div>
+
+  <div class="panel">
+    <h3>连接预览 <span id="linkSummary" class="muted"></span></h3>
+    <div class="muted">把连接表按「出口 → 入口」画成拓扑图：不依赖模块位置，求解之前就能看出接错没有。
+      带编号的曲线 = 第 N 条连接，悬停看详情。</div>
+    <div id="linkPreview" class="link-preview"></div>
+    <div id="linkIssues" class="link-issues"></div>
   </div>
 </section>
 
@@ -115,6 +144,7 @@
 </section>
 </main>
 
+<script src="/static/model.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

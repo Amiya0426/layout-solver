@@ -10,6 +10,8 @@
 
 功能:
     - 浏览/新建/保存 config.<name>.json
+    - 读取 data/设备尺寸.xlsx 作为「模块预设」（见 device_presets.py），
+      前端按预设一键添加模块，不用手点端口
     - 调用 layout_exact.py / layout_solver.py 求解
       · 求解过程中每找到可行解就落盘 solN.svg/txt，前端可随时刷新结果
       · 支持暂停(挂起进程)/继续/停止
@@ -31,6 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
 import proc_ctl
+import device_presets
 
 
 SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -444,6 +447,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(f)
         if path == "/api/problems":
             return self.send_json({"problems": list_problems()})
+        if path == "/api/presets":
+            # 设备尺寸表 -> 模块预设。每次请求都重新读表，改完 xlsx 刷新页面即生效。
+            return self.send_json(device_presets.load_presets())
         if path == "/api/config":
             name = q.get("name", [""])[0]
             cfg = read_json(config_path(name))

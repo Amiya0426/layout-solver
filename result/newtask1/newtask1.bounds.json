@@ -1,0 +1,11 @@
+{
+  "lb": 7,
+  "status": "stopped",
+  "when": "2026-09-11 14:16:20",
+  "best": null,
+  "applied": [],
+  "solve_sec": null,
+  "ortools": null,
+  "config_sha256": "9a77d88c5c9129a4d20940422b4b2ec3db85bc9a7ceee7d5edddab8177223b80",
+  "code_sha256": "b5d9111b09c71d50c1f5b4875e65f6b15f9ca437a72e2f79febfa12c37fa26ec"
+}

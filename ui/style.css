@@ -102,3 +102,54 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   display: flex; align-items: center; gap: 8px; margin-top: 12px;
 }
 .result-pagination button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---------------- 设备预设 ---------------- */
+.hidden { display: none !important; }
+.preset-box {
+  border: 1px dashed #cfd6df; border-radius: 8px; padding: 8px;
+  background: #fafbfd; margin-bottom: 8px;
+}
+#manualAdd summary {
+  cursor: pointer; font-size: 13px; color: #40506a; margin-bottom: 6px;
+}
+.preset-preview { margin-top: 8px; }
+.preset-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 6px; font-size: 13px;
+}
+.preset-head .tag {
+  font-size: 11px; padding: 1px 6px; border-radius: 10px;
+  background: #e6ecf5; color: #40506a;
+}
+.preset-grid { display: grid; gap: 2px; width: max-content; margin-bottom: 6px; }
+.preset-cell {
+  width: 26px; height: 22px; border: 1px solid #d7dee7; border-radius: 3px;
+  background: #fff; font-size: 9px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; text-align: center;
+}
+
+/* ---------------- 连接（OUT -> IN）预览 ---------------- */
+.link-preview {
+  overflow: auto; background: #fbfcfe; border: 1px solid #e3e8ee;
+  border-radius: 8px; padding: 4px; margin: 8px 0;
+}
+.link-svg { display: block; }
+.link-svg .link-group path { transition: stroke-width .12s; }
+.link-svg .link-group.hl path { stroke-width: 4; }
+.link-svg .link-group.hl text { font-weight: 700; font-size: 12px; }
+.net-row.hl { background: #eef4ff; border-radius: 6px; }
+.net-index {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; border-radius: 9px; color: #fff;
+  font-size: 11px; font-weight: 600; padding: 0 4px;
+}
+.net-row .arrow { color: #6b7785; font-size: 13px; }
+.port-select { max-width: 190px; }
+.link-issues { display: flex; flex-direction: column; gap: 3px; }
+.issue { font-size: 12px; padding: 3px 7px; border-radius: 5px; }
+.issue.error { background: #fdecea; color: #b3261e; }
+.issue.warn  { background: #fff4e5; color: #91530a; }
+.issue.info  { background: #eef2f7; color: #52606d; }
+.issue.ok    { background: #e8f6ec; color: #1b6b3a; }
+.issue[data-net] { cursor: pointer; }

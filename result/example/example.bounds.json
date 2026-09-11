@@ -1,0 +1,13 @@
+{
+  "lb": 9,
+  "best": 17,
+  "status": "FEASIBLE",
+  "solve_sec": 120.372,
+  "config_sha256": "62cf984245b3fca2d7449d04b10db8cf01501906389d6cb7ad0af373ceed960c",
+  "code_sha256": "b5d9111b09c71d50c1f5b4875e65f6b15f9ca437a72e2f79febfa12c37fa26ec",
+  "ortools": "9.15.6755",
+  "applied": [
+    "obj<=17"
+  ],
+  "when": "2026-09-10 22:38:54"
+}

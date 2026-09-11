@@ -2,6 +2,8 @@ let cfg = null;
 let currentName = "example";
 let selected = null;       // {kind, index}
 let selectedPort = null;   // port id
+let presets = [];          // 设备尺寸表里的模块预设（data/设备尺寸.xlsx）
+let presetMeta = null;     // {source, source_kind, warnings, markers}
 let resultState = { solutions: [], page: 0, pageSize: 4, sort: "cost-asc", version: 0 };
 
 /* 作业流：每个作业单独一份日志缓冲，互不覆盖 */
@@ -37,10 +39,7 @@ function defaultConfig() {
 }
 
 function allModules() {
-  const out = [];
-  (cfg.fixed || []).forEach((m, i) => out.push({ kind: "fixed", index: i, mod: m }));
-  (cfg.movable || []).forEach((m, i) => out.push({ kind: "movable", index: i, mod: m }));
-  return out;
+  return Model.allModules(cfg);
 }
 
 function getMod(kind, index) {
@@ -133,6 +132,8 @@ function renderAll() {
   renderModuleEditor();
   renderNets();
   renderPreview();
+  renderPresetPreview();
+  renderLinkPreview();
 }
 
 function renderModuleList() {
@@ -141,10 +142,10 @@ function renderModuleList() {
   allModules().forEach(m => {
     const div = document.createElement("div");
     div.className = "mod-item " + m.kind + (selected && selected.kind === m.kind && selected.index === m.index ? " selected" : "");
-    div.innerHTML = `<b>${m.mod.id}</b>
+    div.innerHTML = `<b>${esc(m.mod.id)}</b>
       <span class="tag">${m.kind === "fixed" ? "固定" : "可动"}</span>
       <span>${m.mod.w}×${m.mod.h}</span>
-      <span class="muted">端口 ${(m.mod.ports || []).map(p => p.id).join("/") || "无"}</span>`;
+      <span class="muted">端口 ${esc((m.mod.ports || []).map(p => p.id).join("/") || "无")}</span>`;
     div.onclick = () => {
       selected = {kind: m.kind, index: m.index};
       selectedPort = (m.mod.ports && m.mod.ports[0]) ? m.mod.ports[0].id : null;
@@ -160,7 +161,7 @@ function renderModuleEditor() {
   const m = getMod(selected.kind, selected.index);
   box.innerHTML = `
     <div class="net-row">
-      <label>ID <input id="medId" value="${m.id}" size="8"></label>
+      <label>ID <input id="medId" value="${esc(m.id)}" size="8"></label>
       <label>类型 <select id="medKind">
         <option value="movable" ${selected.kind === "movable" ? "selected" : ""}>可动</option>
         <option value="fixed" ${selected.kind === "fixed" ? "selected" : ""}>固定</option>
@@ -201,7 +202,7 @@ function renderModuleEditor() {
     } else {
       m.rotatable = $("medRot").checked;
     }
-    renderModuleList(); renderPreview();
+    renderModuleList(); renderPreview(); renderPresetPreview(); renderLinkPreview();
   };
   ["medId","medW","medH","medR","medC"].forEach(id => { if ($(id)) $(id).onchange = finish; });
   if ($("medRot")) $("medRot").onchange = finish;
@@ -222,7 +223,8 @@ function renderModuleEditor() {
   (m.ports || []).forEach(p => {
     const chip = document.createElement("span");
     chip.className = "port-chip" + (p.id === selectedPort ? " active" : "");
-    chip.textContent = `${p.id} (${p.dir})`;
+    const info = portInfo(p.id);
+    chip.textContent = `${p.id} (${p.dir}${info.flow ? "·" + info.label : ""})`;
     chip.onclick = () => { selectedPort = p.id; renderModuleEditor(); };
     pl.appendChild(chip);
   });
@@ -248,6 +250,7 @@ function renderModuleEditor() {
       pg.appendChild(cell);
     }
   }
+  renderLinkPreview();
 }
 
 function getArray(kind) { return kind === "fixed" ? cfg.fixed : cfg.movable; }
@@ -272,38 +275,73 @@ function changeKind(m, newKind, done) {
 function renderNets() {
   const box = $("netList");
   box.innerHTML = "";
-  (cfg.nets || []).forEach((n, i) => {
+  const nets = cfg.nets || [];
+  if (!nets.length) {
+    box.innerHTML = '<div class="muted">还没有连接。点下面的「+ 添加连接」，'
+      + '再把左边选成出口（如 SO）、右边选成入口（如 SI）。</div>';
+  }
+  nets.forEach((n, i) => {
     const row = document.createElement("div");
     row.className = "net-row";
-    row.innerHTML = moduleSelect(n.from, "nFrom" + i) +
-      portSelect(n.from, n.from_port, "nFP" + i) + " → " +
-      moduleSelect(n.to, "nTo" + i) + portSelect(n.to, n.to_port, "nTP" + i) +
-      `<button data-del="${i}">删除</button>`;
-    box.appendChild(row);
+    row.dataset.net = i;
+    const chip = document.createElement("span");
+    chip.className = "net-index";
+    chip.style.background = netColor(i);
+    chip.textContent = i + 1;
+    row.appendChild(chip);
+    row.insertAdjacentHTML("beforeend",
+      moduleSelect(n.from, "nFrom" + i) + portSelect(n.from, n.from_port, "nFP" + i, "out")
+      + '<span class="arrow">→</span>'
+      + moduleSelect(n.to, "nTo" + i) + portSelect(n.to, n.to_port, "nTP" + i, "in"));
+    const del = document.createElement("button");
+    del.textContent = "删除";
+    del.onclick = () => { cfg.nets.splice(i, 1); renderAll(); };
+    row.appendChild(del);
     row.querySelectorAll("select").forEach(s => s.onchange = () => {
-      n.from = row.querySelector("select").value;
       const sels = row.querySelectorAll("select");
       n.from = sels[0].value; n.from_port = sels[1].value;
-      n.to = sels[2].value; n.to_port = sels[3].value;
+      n.to = sels[2].value;   n.to_port = sels[3].value;
       renderNets();
+      renderLinkPreview();
     });
-    row.querySelector("button").onclick = () => { cfg.nets.splice(i, 1); renderNets(); };
+    row.onmouseenter = () => highlightNet(i);
+    row.onmouseleave = () => highlightNet(null);
+    box.appendChild(row);
   });
+  // 连接表本身也是“预览”的一部分：改完立刻重画拓扑图
+  if ($("linkPreview")) renderLinkPreview();
 }
 
 function moduleSelect(value, id) {
   let s = `<select id="${id}">`;
   allModules().forEach(m => {
-    s += `<option value="${m.mod.id}" ${m.mod.id === value ? "selected" : ""}>${m.mod.id}</option>`;
+    s += `<option value="${esc(m.mod.id)}" ${m.mod.id === value ? "selected" : ""}>${esc(m.mod.id)}</option>`;
   });
   return s + "</select>";
 }
 
-function portSelect(modId, value, id) {
-  const m = allModules().find(x => x.mod.id === modId);
-  let s = `<select id="${id}">`;
-  ((m && m.mod.ports) || []).forEach(p => {
-    s += `<option value="${p.id}" ${p.id === value ? "selected" : ""}>${p.id}</option>`;
+/* 端口下拉：按 出口/入口/其它 分组，出口端把出口排前面、入口端反过来，
+   这样「OUT -> IN」不用在一堆端口里找。 */
+function portSelect(modId, value, id, side) {
+  const entry = allModules().find(x => x.mod.id === modId);
+  const ports = (entry && entry.mod.ports) || [];
+  const groups = { out: [], in: [], other: [] };
+  ports.forEach(p => {
+    const f = portInfo(p.id).flow;
+    groups[f === "out" ? "out" : f === "in" ? "in" : "other"].push(p);
+  });
+  const order = side === "in" ? ["in", "out", "other"] : ["out", "in", "other"];
+  const titles = { out: "出口", in: "入口", other: "其它端口" };
+  if (!ports.length) return `<select id="${id}"><option value="">（无端口）</option></select>`;
+  let s = `<select id="${id}" class="port-select">`;
+  order.forEach(g => {
+    if (!groups[g].length) return;
+    s += `<optgroup label="${titles[g]}">`;
+    groups[g].forEach(p => {
+      s += `<option value="${esc(p.id)}" ${p.id === value ? "selected" : ""}>`
+        + `${esc(p.id)} · ${esc(portInfo(p.id).label)}</option>`;
+    });
+    s += "</optgroup>";
   });
   return s + "</select>";
 }
@@ -328,6 +366,239 @@ function renderPreview() {
     d.textContent = v || "";
     box.appendChild(d);
   }));
+}
+
+/* ---------------- 通用小工具 ---------------- */
+/* 端口分类、同名编号、连接校验、连线几何这些“要算的”都在 model.js，
+   这里只负责把它们画到页面上（也方便 node 直接测那一半）。 */
+const portInfo = Model.portInfo;
+const findPort = Model.findPort;
+const netColor = Model.netColor;
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ---------------- 设备预设（data/设备尺寸.xlsx） ---------------- */
+async function loadPresets() {
+  try {
+    const data = await api("/api/presets");
+    presets = data.devices || [];
+    presetMeta = data;
+  } catch (e) {
+    presets = [];
+    presetMeta = { warnings: ["读取预设接口失败: " + e.message], devices: [] };
+  }
+  renderPresetSelect();
+  renderPresetPreview();
+}
+
+function presetByName(name) {
+  return presets.find(p => p.name === name) || null;
+}
+
+function renderPresetSelect() {
+  const sel = $("presetSelect");
+  if (!sel) return;
+  const keep = sel.value;
+  const kw = ($("presetFilter").value || "").trim();
+  sel.innerHTML = "";
+  const ph = document.createElement("option");
+  ph.value = "";
+  ph.textContent = presets.length ? "— 选择设备预设 —" : "（没有读到预设）";
+  sel.appendChild(ph);
+  presets.filter(p => !kw || p.name.includes(kw)
+                       || (p.ports || []).some(x => x.id.includes(kw.toUpperCase())))
+    .forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.name;
+      o.textContent = `${p.name}  ${p.w}×${p.h}  ${(p.ports || []).map(x => x.id).join("/") || "无端口"}`;
+      sel.appendChild(o);
+    });
+  if (keep && presets.some(p => p.name === keep)) sel.value = keep;
+  const src = $("presetSource");
+  if (src) {
+    const warns = (presetMeta && presetMeta.warnings) || [];
+    src.textContent = presets.length
+      ? `共 ${presets.length} 个预设 · ${(presetMeta && presetMeta.source) || "?"}`
+        + (warns.length ? ` · ${warns.length} 条告警` : "")
+      : "没读到设备尺寸表：" + warns.join("；");
+    src.title = warns.join("\n");
+  }
+}
+
+/* 预设小图：尺寸 + 每个端口格标出端口 id */
+function renderPresetPreview() {
+  const box = $("presetPreview");
+  if (!box) return;
+  const sel = $("presetSelect");
+  const p = sel ? presetByName(sel.value) : null;
+  if (!p) {
+    box.innerHTML = '<span class="muted">选一个预设，这里会画出它的尺寸与各面端口；'
+      + '添加时同名模块从 1 开始编号（如 精炼炉1、精炼炉2）。</span>';
+    return;
+  }
+  const owners = (r, c) => (p.ports || []).filter(pt => (pt.cells || []).some(x => x[0] === r && x[1] === c));
+  let html = `<div class="preset-head"><b>${esc(p.name)}</b>`
+    + `<span class="tag">${p.w}×${p.h}</span>`
+    + `<span class="muted">${esc(p.summary)}</span>`
+    + `<span class="muted">下一个编号</span><b>${esc(Model.nextModuleId(cfg, p.name))}</b></div>`;
+  html += `<div class="preset-grid" style="grid-template-columns:repeat(${p.w}, 26px)">`;
+  for (let r = 0; r < p.h; r++) {
+    for (let c = 0; c < p.w; c++) {
+      const os = owners(r, c);
+      const info = os.length ? portInfo(os[0].id) : null;
+      const style = info ? `background:${info.color}22;border-color:${info.color};color:${info.color}` : "";
+      html += `<div class="preset-cell" style="${style}" title="${esc(os.map(o => o.id + " " + o.label).join(", "))}">`
+        + `${esc(os.map(o => o.id).join(","))}</div>`;
+    }
+  }
+  html += "</div>";
+  html += `<div class="muted">北 ${esc(p.faces.N || "-")} ｜ 南 ${esc(p.faces.S || "-")}`
+    + ` ｜ 西 ${esc(p.faces.W || "-")} ｜ 东 ${esc(p.faces.E || "-")}</div>`;
+  box.innerHTML = html;
+}
+
+/* 同名模块从 1 开始编号、模块 ID 必须唯一：逻辑在 model.js 里 */
+function addModuleFromPreset() {
+  const sel = $("presetSelect");
+  const p = sel ? presetByName(sel.value) : null;
+  if (!p) return alert("先在「预设设备」里选一个再添加");
+  const kind = $("newModKind").value;
+  const id = Model.nextModuleId(cfg, p.name);   // 相同模块名从 1 开始标记
+  const m = {
+    id, preset: p.name, w: p.w, h: p.h,
+    ports: (p.ports || []).map(pt => ({
+      id: pt.id, dir: pt.dir, cells: (pt.cells || []).map(c => [c[0], c[1]]),
+    })),
+  };
+  if (kind === "fixed") m.pos = [+$("newModR").value || 0, +$("newModC").value || 0];
+  else m.rotatable = $("newModRot").checked;
+  getArray(kind).push(m);
+  selected = { kind, index: getArray(kind).length - 1 };
+  selectedPort = m.ports[0] && m.ports[0].id;
+  renderAll();
+  sel.value = p.name;                        // 连加同名设备：下一个自动变成 name2
+  renderPresetPreview();
+}
+
+/* ---------------- 连接预览 ---------------- */
+/* 端口锚点/刻度/连线几何/连接校验都在 model.js，这里只拼 SVG 字符串。 */
+function renderLinkPreview() {
+  const box = $("linkPreview");
+  if (!box) return;
+  const sum = $("linkSummary"), issuesBox = $("linkIssues");
+  box.innerHTML = "";
+  if (issuesBox) issuesBox.innerHTML = "";
+
+  const mods = allModules();
+  const nets = cfg.nets || [];
+  if (!mods.length) {
+    box.innerHTML = '<span class="muted">还没有模块：先加几个设备，再设置「出口 → 入口」。</span>';
+    if (sum) sum.textContent = "";
+    return;
+  }
+
+  const rep = Model.netReport(cfg);
+  if (sum) {
+    sum.textContent = `${nets.length} 条连接 · ${mods.length} 个模块`
+      + (rep.unusedOut.length ? ` · ${rep.unusedOut.length} 个出口未接` : "")
+      + (rep.idle.length ? ` · ${rep.idle.length} 个模块没参与连接` : "");
+  }
+
+  /* --- 布局：模块框按网格摆放，尺寸与 w×h 成比例 --- */
+  const boxes = Model.layoutBoxes(mods.map(x => ({
+    id: x.mod.id, kind: x.kind, mod: x.mod, w: x.mod.w, h: x.mod.h,
+  })));
+  const width = boxes.width, height = boxes.height;
+  const boxByMod = new Map(boxes.boxes.map(b => [b.id, b]));
+
+  const svg = [];
+  svg.push(`<svg class="link-svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">`);
+  svg.push("<defs>");
+  Model.NET_COLORS.forEach((c, i) => {
+    svg.push(`<marker id="netarrow${i}" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`);
+  });
+  svg.push("</defs>");
+
+  /* --- 连线：出口 -> 入口，两端各沿端口方向伸出一小段再弯过去 --- */
+  const dupKey = new Map();
+  nets.forEach((n, i) => {
+    const fmod = Model.moduleById(cfg, n.from), tmod = Model.moduleById(cfg, n.to);
+    const fp = findPort(fmod, n.from_port, "OUT");
+    const tp = findPort(tmod, n.to_port, "IN");
+    const b1 = boxByMod.get(n.from), b2 = boxByMod.get(n.to);
+    if (!fp || !tp || !b1 || !b2) return;
+    const a = Model.portAnchor(b1, fmod, fp), z = Model.portAnchor(b2, tmod, tp);
+    const k = [n.from, fp.id, n.to, tp.id].join("\u0000");
+    const dup = dupKey.get(k) || 0;      // 同一条线重复出现时错开，免得完全重叠
+    dupKey.set(k, dup + 1);
+    const g = Model.linkGeometry(a, z, dup, { width: width, height: height });
+    const color = netColor(i);
+    const title = `连接 ${i + 1}：${n.from}·${fp.id}（${portInfo(fp.id).label}） → ${n.to}·${tp.id}（${portInfo(tp.id).label}）`;
+    svg.push(`<g class="link-group" data-net="${i}"><title>${esc(title)}</title>`
+      + `<path d="${Model.linkPath(g)}" fill="none" stroke="${color}" stroke-width="2"`
+      + ` marker-end="url(#netarrow${i})"/>`
+      + `<text class="link-index" x="${Model.r1(g.mid.x)}" y="${Model.r1(g.mid.y + 3)}" text-anchor="middle" font-size="10"`
+      + ` fill="${color}" stroke="#fff" stroke-width="3" paint-order="stroke">${i + 1}</text></g>`);
+  });
+
+  /* --- 模块框 + 端口刻度 --- */
+  boxes.boxes.forEach(b => {
+    const m = b.mod;
+    const fixed = b.kind === "fixed";
+    svg.push(`<rect x="${Model.r1(b.x)}" y="${Model.r1(b.y)}" width="${Model.r1(b.w)}" height="${Model.r1(b.h)}" rx="6" fill="${fixed ? "#fdeaea" : "#eef2f7"}" stroke="${fixed ? "#e79b93" : "#c4ccd6"}"/>`);
+    (m.ports || []).forEach(p => {
+      const info = portInfo(p.id);
+      (p.cells || []).forEach(c => {
+        const t = Model.portTick(b, m, p, c);
+        svg.push(`<line x1="${Model.r1(t.x1)}" y1="${Model.r1(t.y1)}" x2="${Model.r1(t.x2)}" y2="${Model.r1(t.y2)}" stroke="${info.color}" stroke-width="3" stroke-linecap="round"/>`);
+      });
+      const a = Model.portAnchor(b, m, p);
+      const lx = a.x + a.dx * 11, ly = a.y + a.dy * 11;
+      const ta = a.dir === "W" ? "end" : a.dir === "E" ? "start" : "middle";
+      const ty = a.dir === "N" ? -3 : a.dir === "S" ? 9 : 3;
+      svg.push(`<text x="${Model.r1(lx)}" y="${Model.r1(ly + ty)}" font-size="8" fill="${info.color}" text-anchor="${ta}">${esc(p.id)}</text>`);
+    });
+    const label = Model.shortLabel(m.id, b.w);
+    svg.push(`<text x="${Model.r1(b.x + b.w / 2)}" y="${Model.r1(b.y + b.h / 2 + 4)}" font-size="10" text-anchor="middle" fill="#1d2733">${esc(label)}</text>`);
+  });
+  svg.push("</svg>");
+  box.innerHTML = svg.join("");
+
+  /* --- 校验提示 --- */
+  if (issuesBox) {
+    const items = rep.issues.slice();
+    rep.idle.forEach(({ mod }) => items.push({ level: "info", net: null, text: `模块「${mod.id}」没有参与任何连接` }));
+    rep.unusedOut.forEach(({ mod, port }) => items.push({ level: "info", net: null, text: `出口「${mod.id}·${port.id}」没有用到` }));
+    if (!items.length) {
+      issuesBox.innerHTML = nets.length
+        ? '<div class="issue ok">连接检查通过：每条连接都是从出口指向入口，端口格子也都在模块内。</div>'
+        : "";
+      return;
+    }
+    const order = { error: 0, warn: 1, info: 2 };
+    items.sort((x, y) => order[x.level] - order[y.level]);
+    issuesBox.innerHTML = items.slice(0, 40).map(it =>
+      `<div class="issue ${it.level}" ${it.net === null || it.net === undefined ? "" : `data-net="${it.net}"`}>`
+      + `${it.level === "error" ? "✕" : it.level === "warn" ? "!" : "·"} ${esc(it.text)}</div>`).join("");
+    issuesBox.querySelectorAll("[data-net]").forEach(el => {
+      const idx = +el.dataset.net;
+      el.onmouseenter = () => highlightNet(idx);
+      el.onmouseleave = () => highlightNet(null);
+    });
+  }
+}
+
+function highlightNet(idx) {
+  const on = idx !== null && idx !== undefined;
+  document.querySelectorAll("#linkPreview .link-group").forEach(g => {
+    g.classList.toggle("hl", on && +g.dataset.net === idx);
+  });
+  document.querySelectorAll("#netList .net-row").forEach(r => {
+    r.classList.toggle("hl", on && +r.dataset.net === idx);
+  });
 }
 
 /* ---------------- tabs ---------------- */
@@ -813,8 +1084,10 @@ $("fileImport").onchange = async (e) => {
   renderAll();
 };
 $("btnAddModule").onclick = () => {
-  const id = $("newModId").value.trim();
-  if (!id) return alert("请填模块 ID");
+  const typed = $("newModId").value.trim();
+  if (!typed) return alert("请填模块 ID");
+  const id = Model.uniqueModuleId(cfg, typed);
+  if (id !== typed) alert(`已经有一个模块叫「${typed}」了，本次添加改用「${id}」\n（模块 ID 必须唯一，重名会互相覆盖）`);
   const kind = $("newModKind").value;
   const w = Math.max(1, +$("newModW").value || 1);
   const h = Math.max(1, +$("newModH").value || 1);
@@ -827,16 +1100,39 @@ $("btnAddModule").onclick = () => {
   $("newModId").value = "";
   renderAll();
 };
+
+/* 预设：选设备 -> 按预设添加（同名从 1 开始编号） */
+$("presetFilter").oninput = renderPresetSelect;
+$("presetSelect").onchange = renderPresetPreview;
+$("btnAddPreset").onclick = addModuleFromPreset;
+function syncKindUI() {
+  const fixed = $("newModKind").value === "fixed";
+  const box = $("posFields");
+  if (box) box.classList.toggle("hidden", !fixed);
+  const rot = $("newModRot");
+  if (rot) rot.disabled = fixed;   // 固定模块不旋转
+}
+$("newModKind").onchange = syncKindUI;
+syncKindUI();
+
 $("btnAddNet").onclick = () => {
   const mods = allModules();
   if (!mods.length) return alert("先添加模块");
   const a = mods[0].mod, b = mods[Math.min(1, mods.length - 1)].mod;
   cfg.nets = cfg.nets || [];
+  // 默认挑「出口 -> 入口」：出口端优先选 OUT/SO/FO/GO，入口端优先选 IN/SI/FI/GI
+  const pick = (mod, flow, fallback) => {
+    const ports = mod.ports || [];
+    const hit = ports.find(p => portInfo(p.id).flow === flow)
+      || ports.find(p => p.id === fallback);
+    return hit ? hit.id : ((ports[0] || {}).id || fallback);
+  };
   cfg.nets.push({
-    from: a.id, from_port: (a.ports[0] || {}).id || "OUT",
-    to: b.id, to_port: (b.ports[0] || {}).id || "IN"
+    from: a.id, from_port: pick(a, "out", "OUT"),
+    to: b.id, to_port: pick(b, "in", "IN")
   });
   renderNets();
+  renderLinkPreview();
 };
 $("btnSolve").onclick = startSolve;
 // 只有精确模式支持 warm start（完整 Hint + 历史上下界）
@@ -878,6 +1174,7 @@ async function restoreJobs() {
 }
 
 (async function init() {
+  await loadPresets();          // 先拿预设，第一次 renderAll 就能用上
   await loadProblems();
   const first = $("problemSelect").value;
   if (first) await loadConfig(first);
