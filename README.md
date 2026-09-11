@@ -275,6 +275,12 @@ python src/layout_exact.py configs/config.toy.json --time-limit 60
   上下界（`obj <= 上次最好解`、`obj >= 上次已证明的下界`）（**默认关闭**）；
 - `--no-relax-phase`：关掉两阶段求解的阶段1（不再先解松弛模型），直接在完整
   模型上搜——排查用；
+- `--presolve auto|on|off`：CP-SAT 的 presolve 策略。`auto`（默认）在**约束很多**
+  （≥ 20 万条）时自动关掉 presolve——大模型上它可能先吃掉好几分钟才轮到搜索
+  （实测 `config.gudi.json` 108 万条约束：开着 presolve 跑 5 分钟还没进搜索，
+  关掉后 10s 就进搜索）。小题目（example 3 万条、toy 6 千条）保持开启；
+- `--param NAME=VALUE`：透传任意 CP-SAT 参数，可重复，例如
+  `--param cp_model_presolve=false --param random_seed=7 --param max_lp_solve_seconds=10`；
 - `--verbose`：打印 CP-SAT 搜索过程。
 
 搜索结果**不设数量上限**：找到多少个可行解就立刻写多少份

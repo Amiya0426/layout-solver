@@ -136,12 +136,12 @@ def _rss_mb():
     return None
 
 
-def _model_size_text(model):
-    """从 CpModel.ModelStats() 里抠出「变量 N 个 / 约束 M 条」，只用于日志。"""
+def _model_stats_counts(model):
+    """(变量数, 约束数)。ModelStats() 要遍历整个模型，一次就好，别反复调。"""
     try:
         stats = model.ModelStats()
     except Exception:                       # noqa: BLE001
-        return ""
+        return None, None
     n_vars = None
     n_cons = 0
     for line in stats.splitlines():
@@ -153,9 +153,77 @@ def _model_size_text(model):
         m = re.match(r"^#k\w+:\s*([\d'\u2019]+)", line)
         if m:
             n_cons += int(re.sub(r"\D", "", m.group(1)))
+    return n_vars, n_cons
+
+
+def _model_size_text(counts):
+    """把 (变量数, 约束数) 变成「变量 N 个 / 约束 M 条」，取不到就返回空串。"""
+    n_vars, n_cons = counts
     if n_vars is None:
         return ""
     return f"变量 {n_vars} 个 / 约束 {n_cons} 条"
+
+
+# 约束条数超过它，`--presolve auto` 就默认关掉 CP-SAT 的 presolve：
+# 大模型上 presolve 会先吃掉几分钟（实测 config.gudi.json 108 万条约束、
+# 5 分钟还没出 presolve），而这段时间本该用来搜索。
+PRESOLVE_AUTO_LIMIT = 200_000
+
+
+def parse_solver_param(text):
+    """把 `--param NAME=VALUE` 解析成 (NAME, value)，值按 bool/int/float 推断。"""
+    if "=" not in text:
+        raise ValueError(f"--param 需要 NAME=VALUE 形式：{text!r}")
+    name, _, raw = text.partition("=")
+    name, raw = name.strip(), raw.strip()
+    low = raw.lower()
+    if low in ("true", "false"):
+        val = (low == "true")
+    else:
+        try:
+            val = int(raw)
+        except ValueError:
+            try:
+                val = float(raw)
+            except ValueError:
+                val = raw
+    return name, val
+
+
+def configure_solver(solver, time_limit, workers, verbose, params=None,
+                     presolve="auto", n_constraints=None):
+    """把时间/线程/日志/presolve 策略和 `--param` 覆盖项落到 solver.parameters。
+
+    返回一句给人看的说明（打进日志），例如：
+        presolve=off（auto：约束 1083452 条 >= 200000）
+    """
+    solver.parameters.max_time_in_seconds = time_limit
+    solver.parameters.num_workers = workers
+    solver.parameters.log_search_progress = verbose
+
+    desc = []
+    if presolve == "off":
+        solver.parameters.cp_model_presolve = False
+        desc.append("presolve=off（--presolve off）")
+    elif presolve == "on":
+        desc.append("presolve=on")
+    elif presolve == "auto" and (n_constraints or 0) >= PRESOLVE_AUTO_LIMIT:
+        solver.parameters.cp_model_presolve = False
+        desc.append(f"presolve=off（auto：约束 {n_constraints} 条 "
+                    f">= {PRESOLVE_AUTO_LIMIT}，留给搜索更划算；"
+                    f"要强制开启用 --presolve on）")
+    else:
+        desc.append(f"presolve=on（auto：约束 {n_constraints or 0} 条）")
+
+    for name, value in sorted((params or {}).items()):
+        if not hasattr(solver.parameters, name):
+            raise ValueError(f"未知的 CP-SAT 参数：{name}"
+                             f"（用 python -c \"from ortools.sat.python import "
+                             f"cp_model; print(cp_model.CpSolver().parameters)\" "
+                             f"可以看全部参数名）")
+        setattr(solver.parameters, name, value)
+        desc.append(f"{name}={value}")
+    return "；".join(desc)
 
 
 def _mem_text():
@@ -488,7 +556,7 @@ def save_prev_bound(prefix, cfg, lb, best, status, solve_sec, applied=None,
 
 def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 on_solution=None, hint_file=None, use_hint=False,
-                relax_phase=True):
+                relax_phase=True, presolve="auto", solver_params=None):
     blog = BuildLog()   # 建模进度日志：每条都带累计/本步耗时
     rows, cols = cfg["rows"], cfg["cols"]
     fixed_mods = []
@@ -831,10 +899,14 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
              f"（每条 net 至少 1 格 = {len(nets)}，"
              f"端点曼哈顿距离再加 {total_lb - len(nets)}）")
 
-    # 规模统计（ModelStats 要遍历整个模型，大模型上本身也要一两秒，单独记一行）
-    size = _model_size_text(model)
+    # 规模统计（ModelStats 要遍历整个模型，大模型上本身也要一两秒，单独记一行；
+    # 这份计数后面还要用来决定 presolve 策略，所以只调一次）
+    counts = _model_stats_counts(model)
+    size = _model_size_text(counts)
     if size:
-        blog(f"模型规模 {size}")
+        blog(f"模型规模 {size}（阶段1 松弛版）")
+    # 阶段2 补上共格细则后：每格多 4 条聚合约束 + 每条 net 一条直通约束
+    n_cons_full = (counts[1] or 0) + (4 + len(nets)) * len(all_cells)
 
     # ---------- Warm start：历史最好解（完整 Hint）+ 目标上下界 ----------
     # 三样东西互相独立、依据不同：
@@ -1145,9 +1217,9 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
         t1 = max(3.0, min(0.35 * time_limit, 120.0))
         blog(f"阶段1（松弛：先不加共格细则）开始，预算 {t1:.1f}s")
         s1 = cp_model.CpSolver()
-        s1.parameters.max_time_in_seconds = t1
-        s1.parameters.num_workers = workers
-        s1.parameters.log_search_progress = verbose
+        p1 = configure_solver(s1, t1, workers, verbose, params=solver_params,
+                              presolve=presolve, n_constraints=n_cons_full)
+        blog(f"阶段1 求解参数: {p1}")
         rec = RelaxRecorder(make_solution, violations=share_violations)
         st1 = s1.Solve(model, rec)
         relax_stat = s1.StatusName(st1)
@@ -1207,9 +1279,8 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
 
     t_left = max(1.0, time_limit - relax_wall)
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = t_left
-    solver.parameters.num_workers = workers
-    solver.parameters.log_search_progress = verbose
+    p2 = configure_solver(solver, t_left, workers, verbose, params=solver_params,
+                          presolve=presolve, n_constraints=n_cons_full)
 
     hint_note = ""
     if notes:
@@ -1225,12 +1296,14 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                          if relax_legal else "，含违规处待 repair"))
     print(
         f"[exact] 阶段2 开始（完整模型）: {len(all_cells)} 个可用格点, "
+        f"完整模型约 {n_cons_full} 条约束, "
         f"建模总耗时 {time.perf_counter() - blog.t0:.1f}s{_mem_text()}, "
         f"阶段1 用时 {relax_wall:.1f}s, 阶段2 预算 {t_left:.1f}s "
         f"(time_limit={time_limit:.1f}s, workers={workers})"
         + hint_note,
         flush=True,
     )
+    print(f"[exact] 阶段2 求解参数: {p2}", flush=True)
 
     saver = SolutionSaver(make_solution, on_solution=on_solution)
     status = solver.Solve(model, saver)
@@ -1316,8 +1389,29 @@ def main():
     ap.add_argument("--no-relax-phase", action="store_true",
                     help="关掉两阶段求解的阶段1（不再先解松弛模型拿骨架/下界），"
                          "直接在完整模型上搜——排查用，一般不需要")
+    ap.add_argument("--presolve", choices=("auto", "on", "off"), default="auto",
+                    help="CP-SAT 的 presolve 策略：auto（默认）在约束很多"
+                         f"（>= {PRESOLVE_AUTO_LIMIT} 条）时自动关掉它，"
+                         "把时间留给搜索；on/off 强制开关")
+    ap.add_argument("--param", action="append", default=[], metavar="NAME=VALUE",
+                    help="透传 CP-SAT 参数，可重复，例如 "
+                         "--param cp_model_presolve=false --param random_seed=7")
     args = ap.parse_args()
     cfg = json.load(open(args.config, encoding="utf-8"))
+    try:
+        solver_params = dict(parse_solver_param(t) for t in args.param)
+    except ValueError as e:
+        print(f"[exact] 参数错误: {e}", flush=True)
+        return 1
+    # 参数名先校验：省得建模几十秒之后才因为拼错参数名报错
+    known = cp_model.CpSolver().parameters
+    for name in solver_params:
+        if not hasattr(known, name):
+            print(f"[exact] 参数错误: 未知的 CP-SAT 参数 {name!r}；"
+                  f"用 `--param cp_model_presolve=false` 这类写法，"
+                  f"参数名可以 print(cp_model.CpSolver().parameters) 看",
+                  flush=True)
+            return 1
 
     base = args.output or layout_viz.default_output_prefix(args.config)
     os.makedirs(os.path.dirname(os.path.abspath(base)) or ".", exist_ok=True)
@@ -1329,7 +1423,8 @@ def main():
     res = solve_exact(cfg, time_limit=args.time_limit, workers=args.workers,
                       verbose=args.verbose, on_solution=writer.submit,
                       hint_file=base, use_hint=args.hint,
-                      relax_phase=not args.no_relax_phase)
+                      relax_phase=not args.no_relax_phase,
+                      presolve=args.presolve, solver_params=solver_params)
     if res is not None and res["cost"] not in writer.costs:
         # 兜底：回调没来得及输出最终最优解时补一份
         writer.submit(res)
@@ -1383,4 +1478,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
