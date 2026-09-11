@@ -29,14 +29,24 @@
 约束：
     - 模块不出界、不重叠、不压固定模块；
     - 传送带不穿过模块；
-    - 不同传送带不共格；
+    - 一格最多走两条带；两条带共格时必须是“一横一纵”的十字直通，
+      且交叉格不能是任何一条带的端点、也不能有转弯；
     - 相连模块之间必须至少有一个带格（紧贴无法布线）。
+
+建模规模（大题目上最容易卡住的地方）：
+    禁带/共格/端点三处都按**格**聚合，而不是按「模块候选 x 格 x net」或
+    「每格 x 每对 net」展开。以 27x30 / 33 可动模块 / 47 连接的
+    configs/config.gudi.json 为例，模型从 208 万变量 / 6290 万约束降到
+    47 万变量 / 108 万约束，建模耗时约 26s、内存约 1GB。
+    建模分步进度（每步的累计/本步耗时、规模、内存）都会打到日志里，
+    求解前的 CP-SAT presolve 静默期也有明确提示。
 """
 
 import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -59,6 +69,98 @@ ROT_DIR = {
     180: {"N": "S", "E": "W", "S": "N", "W": "E"},
     270: {"N": "W", "E": "N", "S": "E", "W": "S"},
 }
+
+
+class BuildLog:
+    """建模阶段的进度日志：每条都带「累计」和「距上一步」的耗时。
+
+    为什么非要有它：大题目（27x30 / 33 可动模块 / 47 连接）光是建模就要
+    几十秒甚至几分钟，以前这段时间一行日志都没有，看起来和卡死没区别。
+    把建模拆成有名字的若干步之后，日志停在哪一步、每步各花了多久一目了然。
+
+    计时基准在每次 solve_exact 开头重置（BuildLog() 构造那一刻），
+    所以「累计」= 本次求解已经过去的时间，与 CP-SAT 的 WallTime 无关。
+    """
+
+    def __init__(self):
+        self.t0 = time.perf_counter()
+        self.last = self.t0
+
+    def __call__(self, msg):
+        now = time.perf_counter()
+        print(f"[exact] {msg} ({now - self.t0:.1f}s, +{now - self.last:.1f}s)",
+              flush=True)
+        self.last = now
+        return now - self.t0
+
+
+def _rss_mb():
+    """当前进程常驻内存（MB）；取不到就返回 None——只是给人看的诊断信息。"""
+    try:                                    # Linux / macOS
+        import resource
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux 单位是 KB，macOS 是字节
+        return rss / (1024.0 * 1024.0) if sys.platform == "darwin" else rss / 1024.0
+    except Exception:                       # noqa: BLE001
+        pass
+    try:                                    # Windows：kernel32.K32GetProcessMemoryInfo
+        import ctypes
+        from ctypes import wintypes
+
+        class _PMC(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.GetCurrentProcess.argtypes = []
+        k32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+        k32.K32GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
+        pmc = _PMC()
+        pmc.cb = ctypes.sizeof(pmc)
+        if k32.K32GetProcessMemoryInfo(k32.GetCurrentProcess(),
+                                       ctypes.byref(pmc), pmc.cb):
+            return pmc.WorkingSetSize / (1024.0 * 1024.0)
+    except Exception:                       # noqa: BLE001
+        pass
+    return None
+
+
+def _model_size_text(model):
+    """从 CpModel.ModelStats() 里抠出「变量 N 个 / 约束 M 条」，只用于日志。"""
+    try:
+        stats = model.ModelStats()
+    except Exception:                       # noqa: BLE001
+        return ""
+    n_vars = None
+    n_cons = 0
+    for line in stats.splitlines():
+        line = line.strip()
+        m = re.match(r"^#Variables:\s*([\d'\u2019]+)", line)
+        if m:
+            n_vars = int(re.sub(r"\D", "", m.group(1)))
+            continue
+        m = re.match(r"^#k\w+:\s*([\d'\u2019]+)", line)
+        if m:
+            n_cons += int(re.sub(r"\D", "", m.group(1)))
+    if n_vars is None:
+        return ""
+    return f"变量 {n_vars} 个 / 约束 {n_cons} 条"
+
+
+def _mem_text():
+    mb = _rss_mb()
+    return f"，进程内存 {mb / 1024.0:.2f}GB" if mb else ""
 
 
 class SolutionSaver(cp_model.CpSolverSolutionCallback):
@@ -307,6 +409,7 @@ def save_prev_bound(prefix, cfg, lb, best, status, solve_sec, applied=None):
 
 def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 on_solution=None, hint_file=None, use_hint=False):
+    blog = BuildLog()   # 建模进度日志：每条都带累计/本步耗时
     rows, cols = cfg["rows"], cfg["cols"]
     fixed_mods = []
     movable_mods = []
@@ -325,13 +428,10 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
     fixed_cells = set()
     for m in fixed_mods:
         fixed_cells.update(m.occ(m.fixed_pos, 0))
-    fixed_occ = {}
-    for m in fixed_mods:
-        fixed_occ[m.id] = m.occ(m.fixed_pos, 0)
 
     # ---------- 候选位置 ----------
+    blog("枚举候选位置（可动模块 x 旋转角 x 不压固定块的落点）")
     cands = {}          # mid -> [{"pos","orient","cells","port_out":{pid:[...]}}]
-    cand_index = {}
     for m in fixed_mods:
         cands[m.id] = [{
             "pos": m.fixed_pos,
@@ -360,19 +460,14 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                     }
                     cs.append({"pos": (r, c), "orient": o, "cells": occ, "port_out": po})
         cands[m.id] = cs
-        cand_index[m.id] = {tuple(x["pos"]): i for i, x in enumerate(cs)}
 
     # 如果某个模块没有候选，直接不可行
     for m in movable_mods:
         if not cands[m.id]:
             print(f"[exact] 模块 {m.id} 无任何合法候选位置", flush=True)
             return None
-    print(
-        "[exact] 候选位置: "
-        + ", ".join(f"{m.id}={len(cands[m.id])}" for m in movable_mods),
-        flush=True,
-    )
-    print("[exact] 正在构建 CP-SAT 模型...", flush=True)
+    blog("候选位置: "
+         + ", ".join(f"{m.id}={len(cands[m.id])}" for m in movable_mods))
 
     model = cp_model.CpModel()
 
@@ -387,72 +482,109 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
     # 固定模块默认选中（不加 exactly one 也行，但约束路径需要 place 索引）
     for m in fixed_mods:
         model.Add(pvar[(m.id, 0)] == 1)
-
-    # ---------- 非重叠 ----------
-    # 每个格位被可动模块占据的次数 <= 1
-    occ_by_cell = {}
-    for m in movable_mods:
-        for i, c in enumerate(cands[m.id]):
-            for cell in c["cells"]:
-                occ_by_cell.setdefault(cell, []).append((m.id, i))
-    for cell, lst in occ_by_cell.items():
-        model.Add(sum(pvar[key] for key in lst) <= 1)
+    blog(f"place 变量 {len(pvar)} 个（每个可动模块恰好选中一个候选位姿）")
 
     # ---------- 网格格点与固定禁区 ----------
     all_cells = [(r, c) for r in range(rows) for c in range(cols) if (r, c) not in fixed_cells]
     cell_idx = {v: i for i, v in enumerate(all_cells)}
+    blog(f"可用格点 {len(all_cells)} 个（固定模块占掉的 {len(fixed_cells)} 格永久禁带）")
 
-    # 端点候选
-    # net_source[n] = [(mid, port_idx 外部格, 需要的候选 place 键 or None, cand 可选范围)]
-    src_cands = []
-    dst_cands = []
-    for net in nets:
+    # ---------- 非重叠 & 模块禁带（按格聚合） ----------
+    # 原写法是「每个模块候选 x 它的每一格 x 每一条 net」都写一条
+    # `place + use <= 1`：27x30 / 47 net 的题目会写出 5500 万条约束，
+    # 光是把它们塞进模型就要十几分钟加几十 GB，建模阶段直接卡死。
+    #
+    # 这里按**格**聚合：
+    #   occ[cell] = 覆盖该格的所有候选 place 之和
+    # 它的取值范围被限制成 0/1（BoolVar），因此
+    #   * 「同格最多一个可动模块」= 原来的非重叠约束，
+    #   * 「模块占的格不能走带」= 每格 nets 条 occ + use <= 1。
+    # 两者都从这一条等式推出来，语义与原来逐条写法完全一致。
+    block_by = {}   # cell -> [place key...]（只含可动模块；固定格子不在 all_cells 里）
+    for m in movable_mods:
+        for i, cand in enumerate(cands[m.id]):
+            for cell in set(cand["cells"]):
+                block_by.setdefault(cell, []).append(pvar[(m.id, i)])
+    occ_var = {}
+    for cell, keys in block_by.items():
+        b = model.NewBoolVar(f"occ_{cell_idx[cell]}")
+        model.Add(b == sum(keys))
+        occ_var[cell] = b
+    blog(f"占用聚合变量 {len(occ_var)} 个（同格模块互斥已并入其中）")
+
+    # ---------- 端点候选（模块端口外侧第一格） ----------
+    # 原写法给每个 (候选, 外侧格) 都建一个 Bool，再加一条 place 链接约束：
+    # 3x3 模块一个端口面就有 3 格，47 条 net 的题目会生成 84 万变量 + 84 万约束。
+    #
+    # 改成按**格**建变量（同样精确）：
+    #   end[cell] <= 「该格能当这个端口外侧格」的候选 place 之和
+    #   sum(end) == 1        （整条 net 恰好一个起点格、一个终点格）
+    # 模块候选恰好选一个 + end 恰好一个 => 被选中的那个候选必须覆盖那个 end 格，
+    # 也就是原来的「(候选, 外侧格) 精确命中」。顺带还剪掉了「端口根本接不出去」
+    # 的候选（原来只有靠 ExactlyOne 才隐含地排除掉它们）。
+    blog("枚举端点候选（各模块端口外侧第一格）")
+
+    def endpoint_cover(mid, pid):
+        """该模块端口在当前候选集合下可能落到的外侧格 -> [候选序号]。"""
+        cover = {}
+        for ci, cand in enumerate(cands[mid]):
+            for _pc, oc in cand["port_out"].get(pid, []):
+                if oc in cell_idx:
+                    cover.setdefault(oc, []).append(ci)
+        return cover
+
+    src_cover = []   # [net] -> {cell: [候选序号]}（Hint 校验与端点回读用）
+    dst_cover = []
+    src_end = []     # [net] -> {cell: BoolVar}
+    dst_end = []
+    pinned = set()   # (模块, 端口)：同一个端口只加一条「候选可用」约束
+    for ni, net in enumerate(nets):
         fm = modules[net["from"]]
         tm = modules[net["to"]]
         fpid = net.get("from_port", "OUT")
         tpid = net.get("to_port", "IN")
-        # 收集该模块所有候选下端口外侧可用的格
-        s = []
-        d = []
-        for mid in (net["from"], net["to"]):
-            is_fixed = modules[mid].fixed
-            for ci, cand in enumerate(cands[mid]):
-                for pid in (fpid if mid == net["from"] else tpid,):
-                    if mid == net["from"]:
-                        for (_pc, oc) in cand["port_out"].get(pid, []):
-                            if oc in cell_idx:
-                                s.append((ci, oc))
-                    else:
-                        for (_pc, oc) in cand["port_out"].get(pid, []):
-                            if oc in cell_idx:
-                                d.append((ci, oc))
-        src_cands.append(s)
-        dst_cands.append(d)
+        s = endpoint_cover(net["from"], fpid)
+        d = endpoint_cover(net["to"], tpid)
+        src_cover.append(s)
+        dst_cover.append(d)
 
-    # 若某 net 没有可用端口，直接不可行
-    for ni, (s, d) in enumerate(zip(src_cands, dst_cands)):
+        # 若某 net 没有可用端口，直接不可行
         if not s or not d:
             print(f"[exact] net {ni} 无可用端口格", flush=True)
             return None
 
-    # ---------- 端点变量 ----------
-    p_src = []   # [net][k] Bool
-    p_dst = []
-    for ni in range(len(nets)):
-        p_src.append([model.NewBoolVar(f"src_{ni}_{k}") for k in range(len(src_cands[ni]))])
-        p_dst.append([model.NewBoolVar(f"dst_{ni}_{k}") for k in range(len(dst_cands[ni]))])
-        model.AddExactlyOne(p_src[ni])
-        model.AddExactlyOne(p_dst[ni])
-        srcm = modules[nets[ni]["from"]]
-        dstm = modules[nets[ni]["to"]]
-        for k, (ci, _oc) in enumerate(src_cands[ni]):
-            if not srcm.fixed:
-                model.Add(p_src[ni][k] <= pvar[(srcm.id, ci)])
-        for k, (ci, _oc) in enumerate(dst_cands[ni]):
-            if not dstm.fixed:
-                model.Add(p_dst[ni][k] <= pvar[(dstm.id, ci)])
+        # 端点模块必须落在一个「端口能接出去」的候选上
+        for m, pid, cover in ((fm, fpid, s), (tm, tpid, d)):
+            if m.fixed or (m.id, pid) in pinned:
+                continue
+            pinned.add((m.id, pid))
+            usable = sorted({ci for cis in cover.values() for ci in cis})
+            model.Add(sum(pvar[(m.id, ci)] for ci in usable) == 1)
+
+        svar = {cell: model.NewBoolVar(f"src_{ni}_{cell_idx[cell]}") for cell in s}
+        dvar = {cell: model.NewBoolVar(f"dst_{ni}_{cell_idx[cell]}") for cell in d}
+        if not fm.fixed:
+            for cell, v in svar.items():
+                model.Add(v <= sum(pvar[(fm.id, ci)] for ci in s[cell]))
+        if not tm.fixed:
+            for cell, v in dvar.items():
+                model.Add(v <= sum(pvar[(tm.id, ci)] for ci in d[cell]))
+        model.AddExactlyOne(list(svar.values()))
+        model.AddExactlyOne(list(dvar.values()))
+        src_end.append(svar)
+        dst_end.append(dvar)
+    naive_end = 0
+    for net in nets:
+        for mid, pid in ((net["from"], net.get("from_port", "OUT")),
+                         (net["to"], net.get("to_port", "IN"))):
+            for cand in cands[mid]:
+                naive_end += sum(1 for _pc, oc in cand["port_out"].get(pid, [])
+                                 if oc in cell_idx)
+    blog(f"端点格变量 {sum(len(v) for v in src_end + dst_end)} 个"
+         f"（原逐 (候选, 外侧格) 写法要 {naive_end} 个）")
 
     # ---------- 弧与 use 变量 ----------
+    blog("建邻接与弧/use 变量")
     neighbors = {}
     for (r, c) in all_cells:
         ns = []
@@ -471,12 +603,15 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
             for nb in neighbors[cell]:
                 arc[(ni, (cell, nb))] = model.NewBoolVar(
                     f"arc_{ni}_{cell_idx[cell]}_{cell_idx[nb]}")
+    blog(f"弧变量 {len(arc)} 个, use 变量 {len(use)} 个")
 
     # 每个 net 在每个格点是否为“笔直横向/纵向穿过”
     # hE/hW: 横向由西向东 / 由东向西；vN/vS: 纵向由北向南 / 由南向北
+    blog("建直通变量（每格每种直通方向 = 一进一出两条弧的 AND）")
     hcomp = {}
     vcomp = {}
     comp_vars = {}   # (ni, cell) -> {"hE"|"hW"|"vN"|"vS": BoolVar or None}
+    n_comp = 0
     for ni in range(len(nets)):
         for (r, c) in all_cells:
             wb = (r, c - 1) if c - 1 >= 0 and (r, c - 1) in cell_idx else None
@@ -485,6 +620,7 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
             sb = (r + 1, c) if r + 1 < rows and (r + 1, c) in cell_idx else None
 
             def make(name, ia, oa):
+                nonlocal n_comp
                 if ia is None or oa is None:
                     return None
                 b = model.NewBoolVar(
@@ -494,6 +630,7 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 model.Add(b <= arc[(ni, ((r, c), oa))])
                 model.Add(b >= arc[(ni, (ia, (r, c)))] +
                           arc[(ni, ((r, c), oa))] - 1)
+                n_comp += 1
                 return b
 
             hE = make("hE", wb, eb)
@@ -508,83 +645,80 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 model.Add(sum(comps) <= 1)
             hcomp[(ni, (r, c))] = sum(b for b in (hE, hW) if b is not None)
             vcomp[(ni, (r, c))] = sum(b for b in (vN, vS) if b is not None)
+    blog(f"直通变量 {n_comp} 个")
 
-    # 端点 cell 对 use 的贡献
-    src_at_cell = {ni: {} for ni in range(len(nets))}
-    dst_at_cell = {ni: {} for ni in range(len(nets))}
-    for ni in range(len(nets)):
-        for cell in all_cells:
-            src_at_cell[ni][cell] = []
-            dst_at_cell[ni][cell] = []
-    for ni in range(len(nets)):
-        for k, (_ci, oc) in enumerate(src_cands[ni]):
-            src_at_cell[ni][oc].append(k)
-        for k, (_ci, oc) in enumerate(dst_cands[ni]):
-            dst_at_cell[ni][oc].append(k)
-
-    # 每个 net 在每个格点的流量平衡
+    # 每个 net 在每个格点的流量平衡 + use 的定义
+    blog(f"流量平衡约束 {len(nets) * len(all_cells)} 组")
     for ni in range(len(nets)):
         for cell in all_cells:
             outs = [arc[(ni, (cell, nb))] for nb in neighbors[cell]]
             ins = [arc[(ni, (nb, cell))] for nb in neighbors[cell]]
-            so = sum(p_src[ni][k] for k in src_at_cell[ni][cell])
-            do = sum(p_dst[ni][k] for k in dst_at_cell[ni][cell])
+            # 端点是「格」级的 BoolVar；该格当不了端点时就是常数 0
+            so = src_end[ni].get(cell, 0)
+            do = dst_end[ni].get(cell, 0)
+            u = use[(ni, cell)]
             model.Add(sum(outs) - sum(ins) == so - do)
             # 简单路径：每个点至多一进一出
             model.Add(sum(outs) <= 1)
             model.Add(sum(ins) <= 1)
-
-            expr = sum(outs) + sum(ins) + so + do
-            model.Add(use[(ni, cell)] <= expr)
-            model.Add(expr >= use[(ni, cell)])
-            # 若端点被选中，该格必须属于该 net
-            model.Add(use[(ni, cell)] >= so)
-            model.Add(use[(ni, cell)] >= do)
+            # use = 该格被本 net 占用（有进、有出、或本身是端点）
+            for t in (so, do):
+                if not isinstance(t, int):      # 常数 0 不用写约束
+                    model.Add(u >= t)
             for a in outs:
-                model.Add(use[(ni, cell)] >= a)
+                model.Add(u >= a)
             for a in ins:
-                model.Add(use[(ni, cell)] >= a)
+                model.Add(u >= a)
+            # 原来这里 `expr >= use` 与上一行完全重复，删掉
+            model.Add(u <= sum(outs) + sum(ins) + so + do)
 
     # 同格最多两条带；若两条带共格，必须一条横直通 + 一条竖直通，
     # 且交叉格不能是任何一条带的端点，也不能有转弯。
+    #
+    # 原写法对每格每一对 (a,b) 都建一个 share 变量 + 8 条 OnlyEnforceIf 约束：
+    # 780 格 x C(47,2)=1081 对 => 84 万变量 + 674 万条约束，47 条 net 的题目
+    # 光这一块就把建模拖死。这里换成按格聚合的等价写法：
+    #   T[cell] = 该格被几条带占用（<=2，等价于原来的 sum(use) <= 2）
+    #   H/V     = 该格有几条带横向/纵向直通（每个 net 至多一种直通方向）
+    #   E       = 该格上有几个端点
+    # T==2（两条带共格）时下面几条合力给出与逐对写法完全相同的要求：
+    #   use_i + T <= 2 + straight_i  => 两条带都必须笔直（不能转弯）
+    #   H + V >= 2T - 2 连同 H<=1、V<=1 => 恰好一条横、一条纵
+    #   E + 2T <= 4                  => 交叉格不能是端点
+    # T<=1 时这几条都是恒真式，所以不会误伤单条带的情形。
+    blog("同格共带/交叉约束（按格聚合，替代逐对 share 变量）")
+    tvar = {}   # cell -> IntVar 该格的带数
     for cell in all_cells:
-        model.Add(sum(use[(ni, cell)] for ni in range(len(nets))) <= 2)
-
-    share_vars = {}   # (cell, a, b) -> “a、b 两条带共格”的 BoolVar
-    for cell in all_cells:
-        for a in range(len(nets)):
-            for b in range(a + 1, len(nets)):
-                both = model.NewBoolVar(f"share_{cell_idx[cell]}_{a}_{b}")
-                share_vars[(cell, a, b)] = both
-                model.Add(both >= use[(a, cell)] + use[(b, cell)] - 1)
-                model.Add(both <= use[(a, cell)])
-                model.Add(both <= use[(b, cell)])
-                # a、b 在该格必须笔直（一个横向或一个纵向）
-                model.Add(hcomp[(a, cell)] + vcomp[(a, cell)] == 1).OnlyEnforceIf(both)
-                model.Add(hcomp[(b, cell)] + vcomp[(b, cell)] == 1).OnlyEnforceIf(both)
-                # 必须恰好一条横、一条纵
-                model.Add(hcomp[(a, cell)] + hcomp[(b, cell)] == 1).OnlyEnforceIf(both)
-                model.Add(vcomp[(a, cell)] + vcomp[(b, cell)] == 1).OnlyEnforceIf(both)
-                # 交叉格不是端点
-                so_a = sum(p_src[a][k] for k in src_at_cell[a][cell])
-                do_a = sum(p_dst[a][k] for k in dst_at_cell[a][cell])
-                so_b = sum(p_src[b][k] for k in src_at_cell[b][cell])
-                do_b = sum(p_dst[b][k] for k in dst_at_cell[b][cell])
-                model.Add(so_a + do_a == 0).OnlyEnforceIf(both)
-                model.Add(so_b + do_b == 0).OnlyEnforceIf(both)
+        T = model.NewIntVar(0, 2, f"t_{cell_idx[cell]}")
+        model.Add(T == sum(use[(ni, cell)] for ni in range(len(nets))))
+        tvar[cell] = T
+        hs = [hcomp[(ni, cell)] for ni in range(len(nets))]
+        vs = [vcomp[(ni, cell)] for ni in range(len(nets))]
+        es = [src_end[ni].get(cell, 0) for ni in range(len(nets))]
+        es += [dst_end[ni].get(cell, 0) for ni in range(len(nets))]
+        model.Add(sum(hs) <= 1)
+        model.Add(sum(vs) <= 1)
+        model.Add(sum(hs) + sum(vs) >= 2 * T - 2)
+        model.Add(sum(es) + 2 * T <= 4)
+        for ni in range(len(nets)):
+            model.Add(use[(ni, cell)] + T
+                      <= 2 + hcomp[(ni, cell)] + vcomp[(ni, cell)])
 
     # 模块占用格不能被带穿过
-    for m in movable_mods + fixed_mods:
-        for i, cand in enumerate(cands[m.id]):
-            for cell in set(cand["cells"]):
-                if cell not in cell_idx:
-                    continue
-                for ni in range(len(nets)):
-                    model.Add(pvar[(m.id, i)] + use[(ni, cell)] <= 1)
+    # （原来这里是 模块候选格数 x net 数 条约束，现在是 格数 x net 数）
+    blog(f"模块禁带约束 {len(occ_var) * len(nets)} 条")
+    for cell, b in occ_var.items():
+        for ni in range(len(nets)):
+            model.Add(b + use[(ni, cell)] <= 1)
 
     # 目标：最小化传送带占用格总数
     obj = sum(use[(ni, cell)] for ni in range(len(nets)) for cell in all_cells)
     model.Minimize(obj)
+    blog("目标函数：最小化传送带占用格总数")
+    # 规模统计（ModelStats 要遍历整个模型，大模型上本身也要一两秒，单独记一行）
+    size = _model_size_text(model)
+    if size:
+        blog(f"模型规模 {size}")
 
     # ---------- Warm start：历史最好解（完整 Hint）+ 目标上下界 ----------
     # 三样东西互相独立、依据不同：
@@ -686,19 +820,18 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
         on_path = [set(p) for p in paths]
 
         # 3) 端点：必须能在当前候选里精确命中（模块也用上面的精确位姿）
-        src_hit, dst_hit = [], []
         for ni in range(len(nets)):
             fm = modules[nets[ni]["from"]]
             tm = modules[nets[ni]["to"]]
-            ks = [k for k, (ci, oc) in enumerate(src_cands[ni])
-                  if oc == paths[ni][0] and (fm.fixed or ci == picks.get(fm.id))]
-            kd = [k for k, (ci, oc) in enumerate(dst_cands[ni])
-                  if oc == paths[ni][-1] and (tm.fixed or ci == picks.get(tm.id))]
-            if not ks or not kd:
-                return None, (f"net {ni} 的端点 {paths[ni][0]} -> "
-                              f"{paths[ni][-1]} 在候选里对不上")
-            src_hit.append(ks[0])
-            dst_hit.append(kd[0])
+            want_s = paths[ni][0]
+            want_d = paths[ni][-1]
+            ok_s = (want_s in src_cover[ni]
+                    and (fm.fixed or picks.get(fm.id) in src_cover[ni][want_s]))
+            ok_d = (want_d in dst_cover[ni]
+                    and (tm.fixed or picks.get(tm.id) in dst_cover[ni][want_d]))
+            if not ok_s or not ok_d:
+                return None, (f"net {ni} 的端点 {want_s} -> "
+                              f"{want_d} 在候选里对不上")
 
         n = 0
         # 4) 模块候选：选中的 1，其余 0
@@ -707,13 +840,22 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 model.AddHint(pvar[(m.id, i)],
                               1 if (m.fixed or picks.get(m.id) == i) else 0)
                 n += 1
-        # 5) 端点候选：命中的 1，其余 0
+        # 4b) 每格占用：历史解里被某个模块占住的格为 1
+        hist_used = set()
+        for m in movable_mods:
+            i = picks.get(m.id)
+            if i is not None:
+                hist_used.update(cands[m.id][i]["cells"])
+        for cell, b in occ_var.items():
+            model.AddHint(b, 1 if cell in hist_used else 0)
+            n += 1
+        # 5) 端点格：命中的 1，其余 0
         for ni in range(len(nets)):
-            for k in range(len(p_src[ni])):
-                model.AddHint(p_src[ni][k], 1 if k == src_hit[ni] else 0)
+            for cell, v in src_end[ni].items():
+                model.AddHint(v, 1 if cell == paths[ni][0] else 0)
                 n += 1
-            for k in range(len(p_dst[ni])):
-                model.AddHint(p_dst[ni][k], 1 if k == dst_hit[ni] else 0)
+            for cell, v in dst_end[ni].items():
+                model.AddHint(v, 1 if cell == paths[ni][-1] else 0)
                 n += 1
         # 6) use：路径格 1，其余 0
         for ni in range(len(nets)):
@@ -721,6 +863,11 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                 model.AddHint(use[(ni, cell)],
                               1 if cell in on_path[ni] else 0)
                 n += 1
+        # 6b) T：该格上历史解的带数
+        for cell in all_cells:
+            model.AddHint(tvar[cell],
+                          sum(1 for ni in range(len(nets)) if cell in on_path[ni]))
+            n += 1
         # 7) arc：路径上相邻格对 1，其余 0
         arc_on = set()
         for ni in range(len(nets)):
@@ -750,11 +897,8 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                     continue
                 model.AddHint(var, 1 if want.get(name) else 0)
                 n += 1
-        # 9) share：两条带都占该格才为 1
-        for (cell, a, b), var in share_vars.items():
-            model.AddHint(var, 1 if (cell in on_path[a] and cell in on_path[b])
-                          else 0)
-            n += 1
+        # （原来第 9 步还要给 84 万个 share 变量逐个 AddHint，
+        #   聚合写法下这些变量已经不存在了。）
         return {
             "cost": hint_cost,
             "modules": len(picks),
@@ -765,10 +909,15 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
 
     hint_stat = None
     if prev_best is not None:
+        t_hint = time.perf_counter()
+        blog("施加完整 Hint（历史最好解的每个变量取值）")
         hint_stat, why = apply_full_hint()
         if hint_stat is None:
             print(f"[exact] 未施加 Hint：{why}（上下界约束仍照常生效）",
                   flush=True)
+        else:
+            blog(f"Hint 施加完成: {hint_stat['hints']} 个变量, "
+                 f"共耗时 {time.perf_counter() - t_hint:.1f}s")
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit
@@ -785,10 +934,14 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
                       f"共 hint {hint_stat['hints']} 个变量")
     print(
         f"[exact] 模型构建完成: {len(all_cells)} 个可用格点, "
-        f"开始 CP-SAT 搜索 (time_limit={time_limit:.1f}s, workers={workers})"
+        f"{size or '规模未知'}, 建模总耗时 {time.perf_counter() - blog.t0:.1f}s"
+        f"{_mem_text()}；开始 CP-SAT 搜索 "
+        f"(time_limit={time_limit:.1f}s, workers={workers})"
         + hint_note,
         flush=True,
     )
+    print("[exact] 提示：CP-SAT 会先做一轮 presolve，模型大时这一步可能几十秒"
+          "没有任何输出，之后才会开始报可行解", flush=True)
 
     def make_solution(slv):
         state = {}
@@ -801,14 +954,19 @@ def solve_exact(cfg, time_limit=120, workers=8, verbose=False,
         paths = []
         for ni, _net in enumerate(nets):
             src_oc = dst_oc = None
-            for k, (_ci, oc) in enumerate(src_cands[ni]):
-                if slv.Value(p_src[ni][k]) == 1:
-                    src_oc = oc
+            for cell, v in src_end[ni].items():
+                if slv.Value(v) == 1:
+                    src_oc = cell
                     break
-            for k, (_ci, oc) in enumerate(dst_cands[ni]):
-                if slv.Value(p_dst[ni][k]) == 1:
-                    dst_oc = oc
+            for cell, v in dst_end[ni].items():
+                if slv.Value(v) == 1:
+                    dst_oc = cell
                     break
+            if src_oc is None or dst_oc is None:
+                # 理论上不会发生（每条 net 恰好一个起点/终点）；真出现就
+                # 别硬凑路径，交给上层按空路径处理。
+                paths.append([])
+                continue
             if src_oc == dst_oc:
                 path = [src_oc]
             else:

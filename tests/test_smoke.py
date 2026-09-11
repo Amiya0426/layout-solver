@@ -44,8 +44,10 @@ def main():
     prefix = os.path.join(out_dir, "toy")
     try:
         # 1) 启发式求解：必须产出 JSONL + SVH/字符画
+        # 注意：--timeout 必须留足余量。启发式在这个小例子上第一个可行解出现在
+        # 3.2s 上下（随机器快慢浮动），之前写死的 3s 会时红时绿。
         r = run([sys.executable, os.path.join(SRC, "layout_solver.py"),
-                 CONFIG, "--timeout", "3", "--output", prefix])
+                 CONFIG, "--timeout", "8", "--output", prefix])
         rep.check("启发式求解退出码为 0", r.returncode == 0,
                   f"rc={r.returncode}")
         jl = prefix + ".solutions.jsonl"
